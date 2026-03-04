@@ -48,7 +48,13 @@ def send_webhook_with_retries(webhook_url: str, result: dict, task_id: str):
         }
 
         try:
-            response = requests.post(webhook_url, json=result, headers=headers, timeout=30)
+            response = requests.post(
+                webhook_url,
+                json=result,
+                headers=headers,
+                timeout=30,
+                allow_redirects=False,
+            )
 
             if response.status_code == 200:
                 logger.info(f"✅ Вебхук успешно отправлен на {webhook_url}")

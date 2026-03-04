@@ -73,7 +73,10 @@ alembic upgrade head
 - `AWS_ACCESS_KEY_ID`: Ключ доступа AWS
 - `AWS_SECRET_ACCESS_KEY`: Секретный ключ AWS
 - `S3_BUCKET`: Имя S3 бакета
-- `SECRET_KEY`: Секретный ключ приложения
+- `SECRET`: Секретный ключ приложения
+- `COOKIE_SECURE`: Отправлять auth-cookie только по HTTPS (`true` для продакшна)
+- `ALLOW_HTTP_WEBHOOKS`: Разрешать ли `http://` webhook URL (по умолчанию `false`)
+- `ALLOW_PRIVATE_WEBHOOK_HOSTS`: Разрешать ли webhook на private/local адреса (по умолчанию `false`)
 - `ELEVENLABS_API_KEY`: API-ключ ElevenLabs
 - `ELEVENLABS_PROXY_URL`: SOCKS5 прокси для ElevenLabs и Gemini (например, `socks5://user:pass@host:port`)
 - `GEMINI_API_KEY`: API-ключ Gemini
@@ -107,7 +110,12 @@ uvicorn app.main:app --reload
 
 В текущей конфигурации приложения Swagger UI и ReDoc отключены
 (`docs_url=None`, `redoc_url=None` в `app/main.py`).
-Используйте клиентский гайд ниже для работы с эндпоинтом транскрибации.
+Используйте документацию в репозитории:
+
+- Полная карта endpoint'ов + процесс создания пользователя через админа:
+  [docs/api-endpoints.md](docs/api-endpoints.md)
+- Клиентский гайд по транскрибации:
+  [docs/transcription-client-guide.md](docs/transcription-client-guide.md)
 
 ## Клиентский гайд: транскрибация (`/transcribe`)
 

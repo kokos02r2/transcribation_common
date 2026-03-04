@@ -10,12 +10,14 @@ from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, Form
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.db import get_async_session
 from app.models import APIToken, WebhookToken
 from pydub import AudioSegment
 from app.models.audiolog import AudioLog
 from app.tasks import celery, transcribe_audio_task, transcribe_elevenlabs_task
 from app.utils.silero_vad import has_speech_async
+from app.utils.webhook_url_validator import validate_webhook_url
 from app.utils.token_checker import validate_api_token
 from app.core.logging_config import setup_logging
 from sqlalchemy.future import select
@@ -46,18 +48,29 @@ async def transcribe_audio(
 ):
     token_user_id = api_token.user_id
     token_user_email = api_token.user.email
-    unique_file_path = f"{TEMP_FOLDER}/{uuid.uuid4()}_{file.filename}"
+    unique_file_path = os.path.join(TEMP_FOLDER, f"{uuid.uuid4().hex}.wav")
+    original_filename = os.path.basename(file.filename or "uploaded.wav")
 
     # Преобразуем строковое значение is_finished в булево
     is_finished_bool = is_finished.lower() == 'true'
 
     # Проверяем расширение файла
-    file_extension = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
+    file_extension = original_filename.rsplit(".", 1)[-1].lower() if "." in original_filename else ""
     if file_extension != ALLOWED_FORMAT:
         raise HTTPException(
             status_code=400,
             detail=f"Invalid file format: {file_extension}. Only WAV format is allowed."
         )
+
+    if webhook_url:
+        try:
+            webhook_url = validate_webhook_url(
+                webhook_url,
+                allow_http=settings.allow_http_webhooks,
+                allow_private_hosts=settings.allow_private_webhook_hosts,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
 
     # Читаем файл в память и проверяем размер
     content = await file.read()
@@ -98,7 +111,7 @@ async def transcribe_audio(
         has_speech = await has_speech_async(unique_file_path)
         log_entry = AudioLog(
             user_login=token_user_email,
-            file_name=file.filename,
+            file_name=original_filename,
             duration_seconds=duration_seconds,
             created_at=datetime.now(timezone.utc).replace(tzinfo=None),
             has_speech=has_speech,
@@ -168,12 +181,19 @@ async def transcribe_audio(
 
 
 @router.get("/transcribe/status/{task_id}")
-def get_status(
+async def get_status(
     task_id: str,
-    api_token: APIToken = Depends(validate_api_token)
+    api_token: APIToken = Depends(validate_api_token),
+    session: AsyncSession = Depends(get_async_session)
 ):
     """Проверяет статус задачи в Celery"""
     try:
+        owner_query = select(AudioLog.user_login).where(AudioLog.task_id == task_id)
+        owner_result = await session.execute(owner_query)
+        owner_login = owner_result.scalar_one_or_none()
+        if owner_login is None or owner_login != api_token.user.email:
+            raise HTTPException(status_code=404, detail="Task not found")
+
         task_result = AsyncResult(task_id, app=celery)
 
         if task_result.state == "PENDING":
@@ -190,5 +210,7 @@ def get_status(
 
         return {"task_id": task_id, "status": task_result.state}
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error retrieving task status: {str(e)}")

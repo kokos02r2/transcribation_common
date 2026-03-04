@@ -21,7 +21,7 @@ cookie_transport = CookieTransport(
     cookie_name="auth_token",  # Имя cookie
     cookie_max_age=3600,       # Время жизни cookie в секундах (1 час)
     cookie_httponly=True,      # Делает cookie недоступным для JavaScript
-    cookie_secure=False,        # Только через HTTPS (отключите в разработке, если нет SSL)
+    cookie_secure=settings.cookie_secure,
 )
 
 
