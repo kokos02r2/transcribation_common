@@ -33,6 +33,7 @@ def validate_webhook_url(
     allow_http: bool = False,
     allow_private_hosts: bool = False,
 ) -> str:
+    webhook_url = webhook_url.strip()
     if not webhook_url:
         raise ValueError("Webhook URL is required")
 

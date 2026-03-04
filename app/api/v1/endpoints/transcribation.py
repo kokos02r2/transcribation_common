@@ -142,15 +142,24 @@ def _extract_text_and_speaker_count(payload: dict) -> tuple[str, int, Optional[s
         return "", 0, "Invalid callback payload"
 
     error_message = _extract_elevenlabs_error(payload, body)
+    transcription = body.get("transcription") if isinstance(body.get("transcription"), dict) else None
 
-    text = str(
-        body.get("text")
-        or body.get("transcript")
-        or payload.get("text")
-        or payload.get("transcript")
-        or ""
-    ).strip()
+    text_candidates = []
+    if transcription:
+        text_candidates.extend([transcription.get("text"), transcription.get("transcript")])
+    text_candidates.extend(
+        [
+            body.get("text"),
+            body.get("transcript"),
+            payload.get("text"),
+            payload.get("transcript"),
+        ]
+    )
+    text = str(next((candidate for candidate in text_candidates if candidate), "")).strip()
+
     words = body.get("words") or payload.get("words")
+    if not words and transcription:
+        words = transcription.get("words")
 
     speakers = set()
     if isinstance(words, list):
@@ -163,6 +172,21 @@ def _extract_text_and_speaker_count(payload: dict) -> tuple[str, int, Optional[s
 
     speaker_count = len(speakers)
     return text, speaker_count, error_message
+
+
+def _extract_provider_payload(payload: dict) -> dict:
+    """
+    Supports both direct provider callback and relay envelope format:
+    {
+      "event_id": "...",
+      "payload": { ...provider payload... },
+      ...
+    }
+    """
+    nested_payload = payload.get("payload")
+    if isinstance(nested_payload, dict):
+        return nested_payload
+    return payload
 
 
 def _verify_relay_signature(headers: Mapping[str, str], raw_body: bytes) -> Optional[str]:
@@ -461,6 +485,15 @@ async def receive_elevenlabs_webhook(request: Request):
         raise HTTPException(status_code=400, detail="Invalid JSON payload")
 
     if not isinstance(payload, dict):
+        logger.warning(f"⚠️ Relay payload is not an object: correlation_id={correlation_id}")
+        raise HTTPException(status_code=400, detail="Invalid webhook payload")
+
+    correlation_id = (
+        (request.headers.get("x-correlation-id") or payload.get("correlation_id") or "-").strip() or "-"
+    )
+
+    if "payload" in payload and not isinstance(payload.get("payload"), dict):
+        logger.warning(f"⚠️ Relay payload field is invalid: correlation_id={correlation_id}")
         raise HTTPException(status_code=400, detail="Invalid webhook payload")
 
     event_id = _extract_relay_event_id(request.headers, payload)
@@ -468,18 +501,25 @@ async def receive_elevenlabs_webhook(request: Request):
         logger.info(f"ℹ️ Duplicate relay event ignored: event_id={event_id} correlation_id={correlation_id}")
         return {"status": "ignored", "reason": "duplicate_event"}
 
-    metadata = _extract_elevenlabs_webhook_metadata(payload)
+    provider_payload = _extract_provider_payload(payload)
+    metadata = _extract_elevenlabs_webhook_metadata(provider_payload)
     task_id = metadata.get("task_id") if isinstance(metadata, dict) else None
     callback_token = metadata.get("callback_token") if isinstance(metadata, dict) else None
 
-    request_id = payload.get("request_id")
-    if not request_id and isinstance(payload.get("data"), dict):
-        request_id = payload["data"].get("request_id")
+    request_id = provider_payload.get("request_id")
+    if not request_id and isinstance(provider_payload.get("data"), dict):
+        request_id = provider_payload["data"].get("request_id")
 
+    resolved_via_request_id = False
     if not task_id and request_id:
         task_id = get_task_id_by_request_id(redis_client, str(request_id))
+        resolved_via_request_id = bool(task_id)
 
     if not task_id:
+        logger.warning(
+            f"⚠️ Missing task identifier in webhook: event_id={event_id or '-'} "
+            f"request_id={request_id or '-'} correlation_id={correlation_id}"
+        )
         raise HTTPException(status_code=400, detail="Missing task identifier")
 
     task_state = get_large_task(redis_client, task_id)
@@ -488,10 +528,13 @@ async def receive_elevenlabs_webhook(request: Request):
 
     expected_callback_token = str(task_state.get("callback_token") or "")
     if expected_callback_token:
-        if not callback_token or not hmac.compare_digest(expected_callback_token, str(callback_token)):
+        if callback_token:
+            if not hmac.compare_digest(expected_callback_token, str(callback_token)):
+                raise HTTPException(status_code=403, detail="Invalid callback token")
+        elif not resolved_via_request_id:
             raise HTTPException(status_code=403, detail="Invalid callback token")
 
-    text, speaker_count, error_message = _extract_text_and_speaker_count(payload)
+    text, speaker_count, error_message = _extract_text_and_speaker_count(provider_payload)
 
     updates = {
         "updated_at": datetime.now(timezone.utc).isoformat(),
@@ -524,14 +567,12 @@ async def receive_elevenlabs_webhook(request: Request):
     )
 
     if updated_state and updated_state.get("client_webhook_url"):
-        result_data = {
-            "stream_id": updated_state.get("stream_id"),
-            "text": text,
-            "type": "transcription",
-            "speaker_count": speaker_count,
-            "is_finished": bool(updated_state.get("is_finished", False)),
-        }
-        send_webhook_with_retries(updated_state["client_webhook_url"], result_data, task_id)
+        send_webhook_with_retries(
+            updated_state["client_webhook_url"],
+            payload,
+            task_id,
+            raw_payload=raw_body,
+        )
 
     return {"status": "accepted", "task_id": task_id, "state": "completed"}
 

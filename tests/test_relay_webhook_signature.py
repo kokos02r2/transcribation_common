@@ -86,6 +86,71 @@ def test_valid_signature_returns_success(client):
     assert response.json()["state"] == "completed"
 
 
+def test_valid_relay_envelope_returns_success(client):
+    payload = {
+        "event_id": "evt-1",
+        "received_at": "2026-03-04T21:42:04Z",
+        "source_signature_valid": True,
+        "correlation_id": "corr-1",
+        "payload": _base_payload(),
+    }
+    raw_body = json.dumps(payload).encode()
+    headers = _build_headers(raw_body, int(time.time()), "relay-secret")
+
+    response = client.post("/webhooks/elevenlabs", content=raw_body, headers=headers)
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "accepted"
+    assert response.json()["state"] == "completed"
+
+
+def test_relay_envelope_with_nested_transcription_and_request_id_mapping(client, monkeypatch):
+    captured = {}
+
+    def _capture_update(_redis_client, _task_id, updates, **_kwargs):
+        captured.update(updates)
+        return {
+            "task_id": "task-1",
+            "client_webhook_url": None,
+            "stream_id": "stream-1",
+            "is_finished": True,
+        }
+
+    monkeypatch.setattr(transcribation_module, "update_large_task", _capture_update)
+
+    payload = {
+        "event_id": "evt-3",
+        "received_at": "2026-03-04T21:42:04Z",
+        "source_signature_valid": True,
+        "correlation_id": "corr-3",
+        "payload": {
+            "type": "speech_to_text_transcription",
+            "data": {
+                "request_id": "req-1",
+                "webhook_metadata": None,
+                "transcription": {
+                    "text": "hello world",
+                    "words": [
+                        {"speaker_id": "speaker_0"},
+                        {"speaker_id": "speaker_1"},
+                    ],
+                },
+            },
+        },
+    }
+    raw_body = json.dumps(payload).encode()
+    headers = _build_headers(raw_body, int(time.time()), "relay-secret")
+
+    response = client.post("/webhooks/elevenlabs", content=raw_body, headers=headers)
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "accepted"
+    assert response.json()["state"] == "completed"
+    assert captured["status"] == "completed"
+    assert captured["text"] == "hello world"
+    assert captured["speaker_count"] == 2
+
+
 def test_invalid_signature_returns_401(client):
     payload = _base_payload()
     raw_body = json.dumps(payload).encode()
@@ -158,3 +223,71 @@ def test_duplicate_event_id_is_ignored_without_business_processing(client, monke
     assert response.status_code == 200
     assert response.json() == {"status": "ignored", "reason": "duplicate_event"}
     assert update_called["value"] is False
+
+
+def test_invalid_relay_envelope_payload_type_returns_400(client):
+    payload = {
+        "event_id": "evt-2",
+        "payload": "not-an-object",
+    }
+    raw_body = json.dumps(payload).encode()
+    headers = _build_headers(raw_body, int(time.time()), "relay-secret")
+
+    response = client.post("/webhooks/elevenlabs", content=raw_body, headers=headers)
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": "Invalid webhook payload"}
+
+
+def test_downstream_receives_raw_relay_payload(client, monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr(
+        transcribation_module,
+        "get_large_task",
+        lambda *_args, **_kwargs: {
+            "task_id": "task-1",
+            "callback_token": "cb-token",
+            "client_webhook_url": "https://client.example/webhook",
+            "stream_id": "stream-1",
+            "is_finished": True,
+            "elevenlabs_request_id": None,
+        },
+    )
+    monkeypatch.setattr(
+        transcribation_module,
+        "update_large_task",
+        lambda *_args, **_kwargs: {
+            "task_id": "task-1",
+            "client_webhook_url": "https://client.example/webhook",
+            "stream_id": "stream-1",
+            "is_finished": True,
+        },
+    )
+
+    def _capture_send(url, result, task_id, raw_payload=None):
+        captured["url"] = url
+        captured["result"] = result
+        captured["task_id"] = task_id
+        captured["raw_payload"] = raw_payload
+        return {"status": "success"}
+
+    monkeypatch.setattr(transcribation_module, "send_webhook_with_retries", _capture_send)
+
+    payload = {
+        "event_id": "evt-raw-1",
+        "received_at": "2026-03-04T21:42:04Z",
+        "source_signature_valid": True,
+        "correlation_id": "corr-raw-1",
+        "payload": _base_payload(),
+    }
+    raw_body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    headers = _build_headers(raw_body, int(time.time()), "relay-secret")
+
+    response = client.post("/webhooks/elevenlabs", content=raw_body, headers=headers)
+
+    assert response.status_code == 200
+    assert captured["url"] == "https://client.example/webhook"
+    assert captured["task_id"] == "task-1"
+    assert captured["result"] == payload
+    assert captured["raw_payload"] == raw_body

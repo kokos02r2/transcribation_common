@@ -1,6 +1,7 @@
 import json
 import os
 import time
+from typing import Optional, Union
 
 import redis
 import requests
@@ -19,7 +20,12 @@ RETRY_DELAYS = [0, 5, 15]  # Быстрые повторы для свежих t
 redis_client = redis.StrictRedis.from_url(REDIS_URL, decode_responses=True)
 
 
-def send_webhook_with_retries(webhook_url: str, result: dict, task_id: str):
+def send_webhook_with_retries(
+    webhook_url: str,
+    result: dict,
+    task_id: str,
+    raw_payload: Optional[Union[str, bytes]] = None,
+):
     """ Отправляет результат в вебхук с повторными попытками при неудаче """
 
     webhook_token = redis_client.get(f"token:{task_id}")
@@ -31,6 +37,10 @@ def send_webhook_with_retries(webhook_url: str, result: dict, task_id: str):
     webhook_token = webhook_token.decode("utf-8") if isinstance(webhook_token, bytes) else str(webhook_token)
 
     payload = json.dumps(result, separators=(',', ':'), sort_keys=True, ensure_ascii=False)
+    request_kwargs = {"json": result}
+    if raw_payload is not None:
+        payload = raw_payload.decode("utf-8") if isinstance(raw_payload, bytes) else str(raw_payload)
+        request_kwargs = {"data": payload}
 
     for attempt, delay in enumerate(RETRY_DELAYS):
         if delay > 0:
@@ -50,7 +60,7 @@ def send_webhook_with_retries(webhook_url: str, result: dict, task_id: str):
         try:
             response = requests.post(
                 webhook_url,
-                json=result,
+                **request_kwargs,
                 headers=headers,
                 timeout=30,
                 allow_redirects=False,
