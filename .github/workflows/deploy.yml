@@ -38,6 +38,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Free disk space before build
+        run: |
+          set -euxo pipefail
+          echo "Disk usage before cleanup:"
+          df -h
+          if command -v docker >/dev/null 2>&1; then
+            docker system df || true
+            docker container prune -f || true
+            docker image prune -af || true
+            docker builder prune -af || true
+            docker volume prune -f || true
+          fi
+          echo "Disk usage after cleanup:"
+          df -h
+
       - name: Prepare image meta
         id: meta
         run: |
@@ -68,6 +83,19 @@ jobs:
           tags: |
             ${{ steps.meta.outputs.image }}:latest
             ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.image_tag }}
+
+      - name: Free disk space after build
+        if: always()
+        run: |
+          set -euxo pipefail
+          if command -v docker >/dev/null 2>&1; then
+            docker container prune -f || true
+            docker image prune -af || true
+            docker builder prune -af || true
+            docker volume prune -f || true
+          fi
+          echo "Disk usage after post-build cleanup:"
+          df -h
 
   deploy:
     runs-on: ubuntu-latest
