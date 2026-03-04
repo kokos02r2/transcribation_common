@@ -5,6 +5,7 @@ import time
 import re
 import gc
 import signal
+from datetime import datetime, timezone
 from celery import chain
 
 import redis
@@ -25,6 +26,11 @@ import urllib.parse
 from contextlib import contextmanager
 
 from app.core.logging_config import setup_logging
+from app.utils.large_transcription_state import (
+    LARGE_TRANSCRIPTION_TTL_SECONDS,
+    set_request_mapping,
+    update_large_task,
+)
 from app.utils.webhook_sender import send_webhook_with_retries
 from app.utils.client_s3 import upload_to_s3
 
@@ -70,6 +76,10 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 # Инициализация ElevenLabs
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
 ELEVENLABS_PROXY_URL = os.getenv("ELEVENLABS_PROXY_URL")
+ELEVENLABS_STT_API_URL = os.getenv("ELEVENLABS_STT_API_URL", "https://api.elevenlabs.io/v1/speech-to-text")
+ELEVENLABS_STT_MODEL_ID = os.getenv("ELEVENLABS_STT_MODEL_ID", "scribe_v2")
+ELEVENLABS_WEBHOOK_ID = os.getenv("ELEVENLABS_WEBHOOK_ID")
+ELEVENLABS_LANGUAGE_CODE = os.getenv("ELEVENLABS_LANGUAGE_CODE", "ru")
 # Инициализация Gemini
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL_NAME = os.getenv("GEMINI_MODEL_NAME", "gemini-3-flash-preview")
@@ -326,6 +336,25 @@ def _prepare_socks5_proxy() -> tuple:
             return None, "Не удалось установить подключение к прокси"
 
     return None, "Не удалось установить подключение к прокси"
+
+
+def _build_requests_proxy_kwargs() -> dict:
+    if not ELEVENLABS_PROXY_URL:
+        return {}
+    return {"proxies": {"http": ELEVENLABS_PROXY_URL, "https": ELEVENLABS_PROXY_URL}}
+
+
+def _mark_large_task_failed(task_id: str, error_message: str) -> None:
+    update_large_task(
+        redis_client,
+        task_id,
+        {
+            "status": "failed",
+            "error": error_message,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        },
+        ttl_seconds=LARGE_TRANSCRIPTION_TTL_SECONDS,
+    )
 
 
 def _transcribe_with_gemini(audio_data: bytes, file_path: str) -> dict:
@@ -1073,6 +1102,117 @@ def _transcribe_with_elevenlabs(audio_data: bytes, file_path: str) -> dict:
             attempt += 1
 
     return {"status": "failed", "error": "Максимальное число попыток исчерпано"}
+
+
+@celery.task(bind=True)
+def submit_large_elevenlabs_task(self, file_path: str, task_id: str, callback_token: str):
+    """
+    Отправляет большой файл в ElevenLabs в webhook-режиме.
+    Финальный результат приходит на внутренний endpoint /webhooks/elevenlabs.
+    """
+    try:
+        if not os.path.exists(file_path):
+            _mark_large_task_failed(task_id, f"File {file_path} not found")
+            return {"status": "failed", "error": f"File {file_path} not found"}
+
+        if not ELEVENLABS_API_KEY:
+            _mark_large_task_failed(task_id, "ELEVENLABS_API_KEY не задан")
+            return {"status": "failed", "error": "ELEVENLABS_API_KEY not configured"}
+
+        webhook_metadata = json.dumps(
+            {"task_id": task_id, "callback_token": callback_token},
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+
+        data = {
+            "model_id": ELEVENLABS_STT_MODEL_ID,
+            "diarize": "true",
+            "tag_audio_events": "false",
+            "webhook": "true",
+            "webhook_metadata": webhook_metadata,
+        }
+        if ELEVENLABS_LANGUAGE_CODE:
+            data["language_code"] = ELEVENLABS_LANGUAGE_CODE
+        if ELEVENLABS_WEBHOOK_ID:
+            data["webhook_id"] = ELEVENLABS_WEBHOOK_ID
+
+        headers = {"xi-api-key": ELEVENLABS_API_KEY}
+        proxy_kwargs = _build_requests_proxy_kwargs()
+
+        with open(file_path, "rb") as audio_file:
+            files = {
+                "file": (
+                    os.path.basename(file_path),
+                    audio_file,
+                    _guess_mime_type(file_path),
+                )
+            }
+            response = requests.post(
+                ELEVENLABS_STT_API_URL,
+                headers=headers,
+                data=data,
+                files=files,
+                timeout=600,
+                **proxy_kwargs,
+            )
+
+        response_text = response.text[:1000]
+        if not response.ok:
+            error_message = (
+                f"ElevenLabs submit failed: {response.status_code} {response_text}"
+            )
+            _mark_large_task_failed(task_id, error_message)
+            return {"status": "failed", "error": error_message}
+
+        try:
+            response_payload = response.json()
+        except ValueError:
+            response_payload = {}
+
+        request_id = (
+            response_payload.get("request_id")
+            or response_payload.get("id")
+            or response_payload.get("transcription_id")
+        )
+
+        updates = {
+            "status": "processing",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "error": None,
+        }
+        if request_id:
+            updates["elevenlabs_request_id"] = str(request_id)
+            set_request_mapping(
+                redis_client,
+                str(request_id),
+                task_id,
+                ttl_seconds=LARGE_TRANSCRIPTION_TTL_SECONDS,
+            )
+
+        update_large_task(
+            redis_client,
+            task_id,
+            updates,
+            ttl_seconds=LARGE_TRANSCRIPTION_TTL_SECONDS,
+        )
+        return {"status": "submitted", "request_id": request_id}
+
+    except requests.RequestException as exc:
+        error_message = f"Ошибка сети при отправке в ElevenLabs: {exc}"
+        _mark_large_task_failed(task_id, error_message)
+        return {"status": "failed", "error": error_message}
+    except Exception as exc:
+        error_message = f"Ошибка submit_large_elevenlabs_task: {exc}"
+        _mark_large_task_failed(task_id, error_message)
+        return {"status": "failed", "error": error_message}
+    finally:
+        try:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+                logger.info(f"🗑 Файл {file_path} удалён после отправки в ElevenLabs.")
+        except Exception as exc:
+            logger.warning(f"⚠️ Ошибка удаления файла {file_path}: {exc}")
 
 
 @celery.task(bind=True)

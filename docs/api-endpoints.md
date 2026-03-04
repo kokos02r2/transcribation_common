@@ -98,12 +98,47 @@ curl -X POST "https://<YOUR_DOMAIN>/admin/users" \
 | Метод | Путь | Доступ | Назначение |
 |---|---|---|---|
 | POST | `/transcribe` | API token (`Bearer`) | Отправить WAV-файл на транскрибацию (асинхронно). |
+| POST | `/transcribe/large` | API token (`Bearer`) | Отправить большой WAV-файл в ElevenLabs async webhook flow. |
 | GET | `/transcribe/status/{task_id}` | API token (`Bearer`) | Проверить статус и результат задачи. |
+| POST | `/webhooks/elevenlabs` | Relay webhook | Внутренний callback endpoint для результата от ElevenLabs (через relay). |
 
 Для `POST /transcribe`:
 - `multipart/form-data`, поле `file` обязательно.
 - Дополнительно: `webhook_url`, `stream_id`, `is_finished`.
 - Ограничения: только `.wav`, до `50 MB`, до `15 минут`.
+
+Для `POST /transcribe/large`:
+- `multipart/form-data`, поле `file` обязательно.
+- Дополнительно: `webhook_url`, `stream_id`, `is_finished`.
+- Ограничения: только `.wav`, до `1 GB`, ограничение по длительности отсутствует.
+- Убедитесь, что reverse-proxy принимает тела такого размера (в Caddy: `request_body.max_size`).
+- Файл принимается потоково (чанками), сохраняется временно на диск и загружается в S3.
+- Endpoint возвращает `task_id`, а финальный статус/результат проверяется через `/transcribe/status/{task_id}`.
+
+### Настройка ElevenLabs callback для `/transcribe/large`
+
+1. В ElevenLabs создайте Speech-to-Text webhook URL:
+   - `https://<YOUR_DOMAIN>/webhooks/elevenlabs`
+2. Если webhook в ElevenLabs несколько, укажите нужный ID в env:
+   - `ELEVENLABS_WEBHOOK_ID=<id>`
+3. Endpoint `/transcribe/large` передает в ElevenLabs `webhook_metadata` с `task_id`,
+   поэтому callback автоматически связывается с исходной задачей.
+4. После получения callback сервис пересылает результат вашему `webhook_url`
+   в том же клиентском формате:
+   - `stream_id`, `text`, `type`, `speaker_count`, `is_finished`.
+
+### Защита входящего relay webhook (`/webhooks/elevenlabs`)
+
+Перед бизнес-обработкой сервис проверяет HMAC-подпись по `raw body`:
+
+- Заголовок подписи: `DOWNSTREAM_HMAC_HEADER` (по умолчанию `x-relay-signature`)
+- Заголовок timestamp: `DOWNSTREAM_TIMESTAMP_HEADER` (по умолчанию `x-relay-timestamp`)
+- Алгоритм: `HMAC_SHA256(DOWNSTREAM_HMAC_SECRET, f"{timestamp}." + raw_body)`
+- Сравнение: `hmac.compare_digest`
+- Окно timestamp: `RELAY_TIMESTAMP_TOLERANCE_SECONDS` (по умолчанию `300`)
+
+При любой ошибке верификации endpoint возвращает:
+- `401 {"detail":"invalid relay signature"}`
 
 ### Биллинг
 

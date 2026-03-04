@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     cookie_secure: bool = True
     allow_http_webhooks: bool = False
     allow_private_webhook_hosts: bool = False
+    downstream_hmac_secret: str = ""
+    downstream_hmac_header: str = "x-relay-signature"
+    downstream_timestamp_header: str = "x-relay-timestamp"
+    relay_timestamp_tolerance_seconds: int = 300
 
     class Config:
         env_file = '.env'

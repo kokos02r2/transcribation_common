@@ -77,8 +77,16 @@ alembic upgrade head
 - `COOKIE_SECURE`: Отправлять auth-cookie только по HTTPS (`true` для продакшна)
 - `ALLOW_HTTP_WEBHOOKS`: Разрешать ли `http://` webhook URL (по умолчанию `false`)
 - `ALLOW_PRIVATE_WEBHOOK_HOSTS`: Разрешать ли webhook на private/local адреса (по умолчанию `false`)
+- `DOWNSTREAM_HMAC_SECRET`: Секрет HMAC для верификации входящего relay webhook (обязательно)
+- `DOWNSTREAM_HMAC_HEADER`: Имя заголовка с relay-подписью (по умолчанию `x-relay-signature`)
+- `DOWNSTREAM_TIMESTAMP_HEADER`: Имя заголовка с relay timestamp (по умолчанию `x-relay-timestamp`)
+- `RELAY_TIMESTAMP_TOLERANCE_SECONDS`: Допустимое окно timestamp для relay webhook (по умолчанию `300`)
 - `ELEVENLABS_API_KEY`: API-ключ ElevenLabs
 - `ELEVENLABS_PROXY_URL`: SOCKS5 прокси для ElevenLabs и Gemini (например, `socks5://user:pass@host:port`)
+- `ELEVENLABS_STT_API_URL`: API URL для ElevenLabs STT (по умолчанию `https://api.elevenlabs.io/v1/speech-to-text`)
+- `ELEVENLABS_STT_MODEL_ID`: Модель ElevenLabs STT (по умолчанию `scribe_v2`)
+- `ELEVENLABS_WEBHOOK_ID`: ID webhook в ElevenLabs (если настроено несколько webhook endpoint'ов)
+- `ELEVENLABS_LANGUAGE_CODE`: Язык аудио для ElevenLabs STT (по умолчанию `ru`)
 - `GEMINI_API_KEY`: API-ключ Gemini
 - `GEMINI_MODEL_NAME`: Модель Gemini (по умолчанию `gemini-3-flash-preview`)
 - `GEMINI_PROMPT`: Промпт для транскрибации (по умолчанию встроенный)
@@ -88,6 +96,7 @@ alembic upgrade head
 - `GEMINI_TIMEOUT_SECONDS`: Таймаут запроса к Gemini в секундах (по умолчанию `60`, `0` — без таймаута)
 - `TRANSCRIPTION_PROVIDER`: Основной провайдер (`elevenlabs` или `gemini`)
 - `TRANSCRIPTION_FALLBACKS`: Фолбэк‑провайдеры через запятую (например, `gemini,elevenlabs`)
+- `LARGE_TRANSCRIPTION_TTL_SECONDS`: TTL состояния задач `/transcribe/large` в Redis (по умолчанию `604800`)
 
 ## Запуск приложения
 

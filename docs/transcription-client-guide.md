@@ -53,6 +53,45 @@ curl -X POST "https://speech.tw1.ru/transcribe" \
   -F "is_finished=true"
 ```
 
+## 2.1 Отправка большого файла (`/transcribe/large`)
+
+Метод: `POST /transcribe/large`  
+Тип тела: `multipart/form-data`
+
+Поля формы:
+
+- `file` (обязательно): WAV-файл
+- `webhook_url` (необязательно): URL для callback клиенту
+- `stream_id` (необязательно): ваш ID потока
+- `is_finished` (необязательно): `true` или `false`
+
+Ограничения:
+
+- Только формат `.wav`
+- Максимальный размер файла: `1 GB`
+- Ограничение по длительности отсутствует
+
+Пример:
+
+```bash
+curl -X POST "https://speech.tw1.ru/transcribe/large" \
+  -H "Authorization: Bearer <ВАШ_API_TOKEN>" \
+  -F "file=@/path/to/large_audio.wav;type=audio/wav" \
+  -F "webhook_url=https://client.example.com/hooks/transcribe" \
+  -F "stream_id=dialog-large-1" \
+  -F "is_finished=true"
+```
+
+Ответ:
+
+```json
+{
+  "task_id": "8a8afdb6-4d59-4e96-9cf8-8fb88f8f25a4",
+  "status": "processing",
+  "s3_url": "https://s3.timeweb.cloud/<bucket>/large/..."
+}
+```
+
 ## 3. Получение результата по `task_id` (polling)
 
 Метод: `GET /transcribe/status/{task_id}`

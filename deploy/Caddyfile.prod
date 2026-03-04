@@ -6,7 +6,7 @@
   encode gzip zstd
 
   request_body {
-    max_size 60MB
+    max_size 1100MB
   }
 
   @blocked_paths {

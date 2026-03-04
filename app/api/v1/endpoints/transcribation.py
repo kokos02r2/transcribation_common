@@ -1,27 +1,48 @@
-import os
-import redis
-from datetime import datetime, timezone
+import hmac
+import hashlib
 import json
+import os
+import secrets
+import time
 import uuid
+from collections.abc import Mapping
+from datetime import datetime, timezone
+from typing import Optional
 
 import aiofiles
+import redis
 from celery.result import AsyncResult
 from dotenv import load_dotenv
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, Form
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from pydub import AudioSegment
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
 
 from app.core.config import settings
 from app.core.db import get_async_session
-from app.models import APIToken, WebhookToken
-from pydub import AudioSegment
-from app.models.audiolog import AudioLog
-from app.tasks import celery, transcribe_audio_task, transcribe_elevenlabs_task
-from app.utils.webhook_url_validator import validate_webhook_url
-from app.utils.token_checker import validate_api_token
 from app.core.logging_config import setup_logging
-from sqlalchemy.future import select
-from app.utils.round_duration_audio import round_duration
+from app.models import APIToken, WebhookToken
+from app.models.audiolog import AudioLog
+from app.tasks import (
+    celery,
+    submit_large_elevenlabs_task,
+    transcribe_audio_task,
+    transcribe_elevenlabs_task,
+)
 from app.utils.add_volume import auto_boost_volume
+from app.utils.client_s3 import upload_to_s3
+from app.utils.large_transcription_state import (
+    LARGE_TRANSCRIPTION_TTL_SECONDS,
+    get_large_task,
+    get_task_id_by_request_id,
+    safe_json_loads,
+    set_large_task,
+    update_large_task,
+)
+from app.utils.round_duration_audio import round_duration
+from app.utils.token_checker import validate_api_token
+from app.utils.webhook_sender import send_webhook_with_retries
+from app.utils.webhook_url_validator import validate_webhook_url
 
 load_dotenv()
 router = APIRouter()
@@ -31,9 +52,180 @@ TEMP_FOLDER = "temporary_files"
 REDIS_URL = os.getenv("REDIS_URL")
 MAX_AUDIO_DURATION = 900
 MAX_FILE_SIZE = 50 * 1024 * 1024
+LARGE_MAX_FILE_SIZE = 1024 * 1024 * 1024
+UPLOAD_CHUNK_SIZE = 4 * 1024 * 1024
 ALLOWED_FORMAT = "wav"
+RELAY_EVENT_PREFIX = "relay_event"
 os.makedirs(TEMP_FOLDER, exist_ok=True)
 redis_client = redis.StrictRedis.from_url(REDIS_URL, decode_responses=True)
+
+
+def _safe_remove_file(file_path: str) -> None:
+    try:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+    except Exception as exc:
+        logger.warning(f"⚠️ Ошибка при удалении временного файла {file_path}: {exc}")
+
+
+async def _save_upload_file_stream(upload_file: UploadFile, destination: str, max_bytes: int) -> int:
+    total_size = 0
+    try:
+        async with aiofiles.open(destination, "wb") as out_file:
+            while True:
+                chunk = await upload_file.read(UPLOAD_CHUNK_SIZE)
+                if not chunk:
+                    break
+                total_size += len(chunk)
+                if total_size > max_bytes:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"The file is too large: {total_size / (1024 * 1024):.1f} MB. "
+                            f"The maximum size is {max_bytes / (1024 * 1024):.0f} MB."
+                        ),
+                    )
+                await out_file.write(chunk)
+    finally:
+        await upload_file.close()
+
+    return total_size
+
+
+async def _cache_signature_token_for_task(task_id: str, user_id: int, user_email: str, session: AsyncSession) -> None:
+    result = await session.execute(select(WebhookToken).where(WebhookToken.user_id == user_id))
+    webhook_token_entry = result.scalars().first()
+
+    if webhook_token_entry:
+        redis_client.setex(f"token:{task_id}", LARGE_TRANSCRIPTION_TTL_SECONDS, webhook_token_entry.token)
+        logger.info(f"🔹 Найден webhook-токен для пользователя {user_email}")
+    else:
+        logger.warning(f"⚠️ Webhook-токен для пользователя {user_email} не найден!")
+
+
+def _extract_elevenlabs_webhook_metadata(payload: dict) -> dict:
+    metadata_candidates = [
+        payload.get("webhook_metadata"),
+        payload.get("metadata"),
+    ]
+
+    data_field = payload.get("data")
+    if isinstance(data_field, dict):
+        metadata_candidates.extend(
+            [
+                data_field.get("webhook_metadata"),
+                data_field.get("metadata"),
+            ]
+        )
+
+    for candidate in metadata_candidates:
+        parsed = safe_json_loads(candidate)
+        if parsed:
+            return parsed
+
+    return {}
+
+
+def _extract_elevenlabs_error(payload: dict, body: dict) -> Optional[str]:
+    for source in (payload, body):
+        if isinstance(source, dict) and source.get("error"):
+            value = source.get("error")
+            if isinstance(value, dict):
+                return str(value.get("message") or value)
+            return str(value)
+    return None
+
+
+def _extract_text_and_speaker_count(payload: dict) -> tuple[str, int, Optional[str]]:
+    body = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+    if not isinstance(body, dict):
+        return "", 0, "Invalid callback payload"
+
+    error_message = _extract_elevenlabs_error(payload, body)
+
+    text = str(
+        body.get("text")
+        or body.get("transcript")
+        or payload.get("text")
+        or payload.get("transcript")
+        or ""
+    ).strip()
+    words = body.get("words") or payload.get("words")
+
+    speakers = set()
+    if isinstance(words, list):
+        for item in words:
+            if not isinstance(item, dict):
+                continue
+            speaker_id = item.get("speaker_id") or item.get("speaker")
+            if speaker_id:
+                speakers.add(str(speaker_id))
+
+    speaker_count = len(speakers)
+    return text, speaker_count, error_message
+
+
+def _verify_relay_signature(headers: Mapping[str, str], raw_body: bytes) -> Optional[str]:
+    signature_header = settings.downstream_hmac_header
+    timestamp_header = settings.downstream_timestamp_header
+
+    received_signature = (headers.get(signature_header) or "").strip()
+    timestamp_raw = (headers.get(timestamp_header) or "").strip()
+
+    if not received_signature or not timestamp_raw:
+        return "missing_header"
+
+    try:
+        timestamp = int(timestamp_raw)
+    except (TypeError, ValueError):
+        return "bad_timestamp"
+
+    tolerance = max(int(settings.relay_timestamp_tolerance_seconds), 0)
+    now_unix = int(time.time())
+    if abs(now_unix - timestamp) > tolerance:
+        return "stale_timestamp"
+
+    secret = settings.downstream_hmac_secret
+    if not secret:
+        return "signature_mismatch"
+    signed_payload = f"{timestamp}.".encode() + raw_body
+    expected_signature = hmac.new(secret.encode(), signed_payload, hashlib.sha256).hexdigest()
+
+    if not hmac.compare_digest(expected_signature, received_signature):
+        return "signature_mismatch"
+
+    return None
+
+
+def _extract_relay_event_id(headers: Mapping[str, str], payload: dict) -> Optional[str]:
+    candidates = [
+        headers.get("x-relay-event-id"),
+        headers.get("x-event-id"),
+        payload.get("event_id"),
+        payload.get("id"),
+    ]
+
+    data = payload.get("data")
+    if isinstance(data, dict):
+        candidates.extend([data.get("event_id"), data.get("id")])
+
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        value = str(candidate).strip()
+        if value:
+            return value
+    return None
+
+
+def _remember_relay_event_once(event_id: str) -> bool:
+    try:
+        event_key = f"{RELAY_EVENT_PREFIX}:{event_id}"
+        result = redis_client.set(event_key, "1", nx=True, ex=LARGE_TRANSCRIPTION_TTL_SECONDS)
+        return bool(result)
+    except Exception as exc:
+        logger.warning(f"⚠️ Не удалось проверить дубликат event_id={event_id}: {exc}")
+        return True
 
 
 @router.post("/transcribe")
@@ -41,24 +233,22 @@ async def transcribe_audio(
     file: UploadFile = File(...),
     webhook_url: str = Form(None),
     stream_id: str = Form(None),
-    is_finished: str = Form('false'),
+    is_finished: str = Form("false"),
     api_token: APIToken = Depends(validate_api_token),
-    session: AsyncSession = Depends(get_async_session)
+    session: AsyncSession = Depends(get_async_session),
 ):
     token_user_id = api_token.user_id
     token_user_email = api_token.user.email
     unique_file_path = os.path.join(TEMP_FOLDER, f"{uuid.uuid4().hex}.wav")
     original_filename = os.path.basename(file.filename or "uploaded.wav")
 
-    # Преобразуем строковое значение is_finished в булево
-    is_finished_bool = is_finished.lower() == 'true'
+    is_finished_bool = is_finished.lower() == "true"
 
-    # Проверяем расширение файла
     file_extension = original_filename.rsplit(".", 1)[-1].lower() if "." in original_filename else ""
     if file_extension != ALLOWED_FORMAT:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid file format: {file_extension}. Only WAV format is allowed."
+            detail=f"Invalid file format: {file_extension}. Only WAV format is allowed.",
         )
 
     if webhook_url:
@@ -71,40 +261,33 @@ async def transcribe_audio(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
 
-    # Читаем файл в память и проверяем размер
     content = await file.read()
     file_size = len(content)
     if file_size > MAX_FILE_SIZE:
         raise HTTPException(
             status_code=400,
-            detail=f"The file is too large: {file_size / (1024 * 1024):.1f} MB. The maximum size is 50 MB."
+            detail=f"The file is too large: {file_size / (1024 * 1024):.1f} MB. The maximum size is 50 MB.",
         )
 
-    # Сохраняем временный файл
     async with aiofiles.open(unique_file_path, "wb") as out_file:
         await out_file.write(content)
 
     try:
-        # Проверяем, что это действительно WAV-файл, и его длительность
         try:
             audio = AudioSegment.from_wav(unique_file_path)
         except Exception:
-            os.remove(unique_file_path)
-            raise HTTPException(
-                status_code=400,
-                detail="The file is not a valid WAV file."
-            )
+            _safe_remove_file(unique_file_path)
+            raise HTTPException(status_code=400, detail="The file is not a valid WAV file.")
 
-        duration_seconds = len(audio) / 1000  # Длительность в секундах
+        duration_seconds = len(audio) / 1000
         if duration_seconds > MAX_AUDIO_DURATION:
-            os.remove(unique_file_path)
+            _safe_remove_file(unique_file_path)
             raise HTTPException(
                 status_code=400,
-                detail=f"The file is too long: {duration_seconds:.1f} seconds. The maximum duration is 15 minutes."
+                detail=f"The file is too long: {duration_seconds:.1f} seconds. The maximum duration is 15 minutes.",
             )
 
-        raw_duration = round(duration_seconds)
-        duration_seconds = round_duration(raw_duration)
+        duration_seconds = round_duration(round(duration_seconds))
 
         log_entry = AudioLog(
             user_login=token_user_email,
@@ -112,33 +295,21 @@ async def transcribe_audio(
             duration_seconds=duration_seconds,
             created_at=datetime.now(timezone.utc).replace(tzinfo=None),
             has_speech=None,
-            processing_type="transcription"
+            processing_type="transcription",
         )
 
-        # 3️⃣ Авто-усиление громкости
         boosted_file_path = auto_boost_volume(unique_file_path)
 
-        # Запускаем задачу
         if webhook_url:
             task = transcribe_elevenlabs_task.delay(boosted_file_path, webhook_url, stream_id)
             webhook_data = {
                 "url": webhook_url,
                 "stream_id": stream_id,
-                "is_finished": is_finished_bool
+                "is_finished": is_finished_bool,
             }
             redis_client.setex(f"webhook:{task.id}", 86400, json.dumps(webhook_data))
             log_entry.task_id = task.id
-
-            # Ищем WebhookToken в БД
-            result = await session.execute(select(WebhookToken).where(WebhookToken.user_id == token_user_id))
-            webhook_token_entry = result.scalars().first()
-
-            if webhook_token_entry:
-                webhook_token = webhook_token_entry.token
-                logger.info(f"🔹 Найден webhook-токен для пользователя {token_user_email}")
-                redis_client.setex(f"token:{task.id}", 86400, webhook_token)
-            else:
-                logger.warning(f"⚠️ Webhook-токен для пользователя {token_user_email} не найден!")
+            await _cache_signature_token_for_task(task.id, token_user_id, token_user_email, session)
         else:
             task = transcribe_audio_task.delay(boosted_file_path)
             log_entry.task_id = task.id
@@ -147,28 +318,231 @@ async def transcribe_audio(
         await session.commit()
 
         return {"task_id": task.id, "status": "processing"}
-    except HTTPException as e:
-        # Пробрасываем HTTPException (например, 400) напрямую
-        raise e
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"⚠️ Ошибка в эндпоинте /transcribe: {exc}")
+        _safe_remove_file(unique_file_path)
+        raise HTTPException(status_code=500, detail=str(exc))
 
-    except Exception as e:
-        logger.error(f"⚠️ Ошибка в эндпоинте /transcribe: {str(e)}")
-        # Удаляем файл только в случае ошибки, если обработка не пошла дальше
-        if os.path.exists(unique_file_path):
-            try:
-                os.remove(unique_file_path)
-            except Exception as ex:
-                logger.warning(f"⚠️ Ошибка при удалении временного файла {unique_file_path}: {ex}")
-        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/transcribe/large")
+async def transcribe_large_audio(
+    file: UploadFile = File(...),
+    webhook_url: str = Form(None),
+    stream_id: str = Form(None),
+    is_finished: str = Form("false"),
+    api_token: APIToken = Depends(validate_api_token),
+    session: AsyncSession = Depends(get_async_session),
+):
+    token_user_id = api_token.user_id
+    token_user_email = api_token.user.email
+    original_filename = os.path.basename(file.filename or "uploaded.wav")
+    file_extension = original_filename.rsplit(".", 1)[-1].lower() if "." in original_filename else ""
+    if file_extension != ALLOWED_FORMAT:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid file format: {file_extension}. Only WAV format is allowed.",
+        )
+
+    if webhook_url:
+        try:
+            webhook_url = validate_webhook_url(
+                webhook_url,
+                allow_http=settings.allow_http_webhooks,
+                allow_private_hosts=settings.allow_private_webhook_hosts,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    is_finished_bool = is_finished.lower() == "true"
+    task_id = str(uuid.uuid4())
+    callback_token = secrets.token_urlsafe(32)
+    temp_file_path = os.path.join(TEMP_FOLDER, f"{uuid.uuid4().hex}.wav")
+
+    try:
+        file_size = await _save_upload_file_stream(file, temp_file_path, LARGE_MAX_FILE_SIZE)
+        if file_size == 0:
+            _safe_remove_file(temp_file_path)
+            raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+        s3_file_name = f"large/{task_id}_{original_filename}"
+        s3_url = upload_to_s3(temp_file_path, s3_file_name)
+
+        large_state = {
+            "status": "processing",
+            "task_id": task_id,
+            "user_email": token_user_email,
+            "file_name": original_filename,
+            "file_size_bytes": file_size,
+            "s3_url": s3_url,
+            "client_webhook_url": webhook_url,
+            "stream_id": stream_id,
+            "is_finished": is_finished_bool,
+            "callback_token": callback_token,
+            "processing_type": "transcription_large",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "text": "",
+            "speaker_count": 0,
+            "error": None,
+            "elevenlabs_request_id": None,
+        }
+        set_large_task(redis_client, task_id, large_state, ttl_seconds=LARGE_TRANSCRIPTION_TTL_SECONDS)
+
+        if webhook_url:
+            webhook_data = {
+                "url": webhook_url,
+                "stream_id": stream_id,
+                "is_finished": is_finished_bool,
+            }
+            redis_client.setex(
+                f"webhook:{task_id}",
+                LARGE_TRANSCRIPTION_TTL_SECONDS,
+                json.dumps(webhook_data),
+            )
+            await _cache_signature_token_for_task(task_id, token_user_id, token_user_email, session)
+
+        log_entry = AudioLog(
+            user_login=token_user_email,
+            file_name=original_filename,
+            duration_seconds=0,
+            created_at=datetime.now(timezone.utc).replace(tzinfo=None),
+            has_speech=None,
+            task_id=task_id,
+            processing_type="transcription_large",
+        )
+        session.add(log_entry)
+        await session.commit()
+
+        submit_large_elevenlabs_task.apply_async(
+            args=[temp_file_path, task_id, callback_token],
+            task_id=task_id,
+        )
+
+        return {
+            "task_id": task_id,
+            "status": "processing",
+            "s3_url": s3_url,
+        }
+    except HTTPException:
+        _safe_remove_file(temp_file_path)
+        raise
+    except Exception as exc:
+        logger.error(f"⚠️ Ошибка в эндпоинте /transcribe/large: {exc}")
+        _safe_remove_file(temp_file_path)
+        update_large_task(
+            redis_client,
+            task_id,
+            {
+                "status": "failed",
+                "error": str(exc),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+            ttl_seconds=LARGE_TRANSCRIPTION_TTL_SECONDS,
+        )
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/webhooks/elevenlabs")
+async def receive_elevenlabs_webhook(request: Request):
+    raw_body = await request.body()
+    correlation_id = (request.headers.get("x-correlation-id") or "-").strip() or "-"
+    invalid_reason = _verify_relay_signature(request.headers, raw_body)
+    if invalid_reason:
+        logger.warning(
+            f"⚠️ Relay signature rejected: reason={invalid_reason} correlation_id={correlation_id}"
+        )
+        raise HTTPException(status_code=401, detail="invalid relay signature")
+
+    try:
+        payload = json.loads(raw_body.decode("utf-8"))
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload")
+
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid webhook payload")
+
+    event_id = _extract_relay_event_id(request.headers, payload)
+    if event_id and not _remember_relay_event_once(event_id):
+        logger.info(f"ℹ️ Duplicate relay event ignored: event_id={event_id} correlation_id={correlation_id}")
+        return {"status": "ignored", "reason": "duplicate_event"}
+
+    metadata = _extract_elevenlabs_webhook_metadata(payload)
+    task_id = metadata.get("task_id") if isinstance(metadata, dict) else None
+    callback_token = metadata.get("callback_token") if isinstance(metadata, dict) else None
+
+    request_id = payload.get("request_id")
+    if not request_id and isinstance(payload.get("data"), dict):
+        request_id = payload["data"].get("request_id")
+
+    if not task_id and request_id:
+        task_id = get_task_id_by_request_id(redis_client, str(request_id))
+
+    if not task_id:
+        raise HTTPException(status_code=400, detail="Missing task identifier")
+
+    task_state = get_large_task(redis_client, task_id)
+    if not task_state:
+        return {"status": "ignored", "reason": "unknown_task"}
+
+    expected_callback_token = str(task_state.get("callback_token") or "")
+    if expected_callback_token:
+        if not callback_token or not hmac.compare_digest(expected_callback_token, str(callback_token)):
+            raise HTTPException(status_code=403, detail="Invalid callback token")
+
+    text, speaker_count, error_message = _extract_text_and_speaker_count(payload)
+
+    updates = {
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "elevenlabs_request_id": str(request_id) if request_id else task_state.get("elevenlabs_request_id"),
+    }
+
+    if error_message:
+        updates.update({"status": "failed", "error": error_message})
+        update_large_task(
+            redis_client,
+            task_id,
+            updates,
+            ttl_seconds=LARGE_TRANSCRIPTION_TTL_SECONDS,
+        )
+        return {"status": "accepted", "task_id": task_id, "state": "failed"}
+
+    updates.update(
+        {
+            "status": "completed",
+            "text": text,
+            "speaker_count": speaker_count,
+            "error": None,
+        }
+    )
+    updated_state = update_large_task(
+        redis_client,
+        task_id,
+        updates,
+        ttl_seconds=LARGE_TRANSCRIPTION_TTL_SECONDS,
+    )
+
+    if updated_state and updated_state.get("client_webhook_url"):
+        result_data = {
+            "stream_id": updated_state.get("stream_id"),
+            "text": text,
+            "type": "transcription",
+            "speaker_count": speaker_count,
+            "is_finished": bool(updated_state.get("is_finished", False)),
+        }
+        send_webhook_with_retries(updated_state["client_webhook_url"], result_data, task_id)
+
+    return {"status": "accepted", "task_id": task_id, "state": "completed"}
 
 
 @router.get("/transcribe/status/{task_id}")
 async def get_status(
     task_id: str,
     api_token: APIToken = Depends(validate_api_token),
-    session: AsyncSession = Depends(get_async_session)
+    session: AsyncSession = Depends(get_async_session),
 ):
-    """Проверяет статус задачи в Celery"""
+    """Проверяет статус задачи в Celery или в async flow для больших файлов."""
     try:
         owner_query = select(AudioLog.user_login).where(AudioLog.task_id == task_id)
         owner_result = await session.execute(owner_query)
@@ -176,23 +550,47 @@ async def get_status(
         if owner_login is None or owner_login != api_token.user.email:
             raise HTTPException(status_code=404, detail="Task not found")
 
-        task_result = AsyncResult(task_id, app=celery)
+        large_state = get_large_task(redis_client, task_id)
+        if large_state:
+            state = str(large_state.get("status") or "processing").lower()
+            if state == "completed":
+                return {
+                    "task_id": task_id,
+                    "status": "completed",
+                    "text": large_state.get("text", ""),
+                }
+            if state == "failed":
+                return {
+                    "task_id": task_id,
+                    "status": "failed",
+                    "error": large_state.get("error", "Unknown error"),
+                }
+            return {"task_id": task_id, "status": "processing"}
 
+        task_result = AsyncResult(task_id, app=celery)
         if task_result.state == "PENDING":
             return {"task_id": task_id, "status": "processing"}
 
-        elif task_result.state == "SUCCESS":
+        if task_result.state == "SUCCESS":
             result = task_result.result
             if isinstance(result, dict) and "text" in result:
-                return {"task_id": task_id, "status": "completed", "text": result["text"]}
+                return {
+                    "task_id": task_id,
+                    "status": "completed",
+                    "text": result["text"],
+                }
             return {"task_id": task_id, "status": "completed", "text": str(result)}
 
-        elif task_result.state == "FAILURE":
-            return {"task_id": task_id, "status": "failed", "error": str(task_result.result)}
+        if task_result.state == "FAILURE":
+            return {
+                "task_id": task_id,
+                "status": "failed",
+                "error": str(task_result.result),
+            }
 
         return {"task_id": task_id, "status": task_result.state}
 
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error retrieving task status: {str(e)}")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Error retrieving task status: {exc}")
