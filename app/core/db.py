@@ -1,0 +1,33 @@
+from sqlalchemy import Column, Integer
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.orm import declarative_base, declared_attr, sessionmaker
+
+from app.core.config import settings
+
+
+class PreBase:
+
+    @declared_attr
+    def __tablename__(cls):
+        return cls.__name__.lower()
+
+    id = Column(Integer, primary_key=True)
+
+
+Base = declarative_base(cls=PreBase)
+
+engine = create_async_engine(
+    settings.database_url,
+    pool_size=100,             # Размер пула соединений
+    max_overflow=50,          # Дополнительные соединения при перегрузке
+    pool_timeout=30,          # Тайм-аут ожидания соединения (в секундах)
+    pool_pre_ping=True,       # Проверка соединений перед использованием
+    pool_recycle=300,
+)
+
+AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession)
+
+
+async def get_async_session():
+    async with AsyncSessionLocal() as session:
+        yield session

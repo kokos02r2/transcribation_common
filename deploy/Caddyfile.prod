@@ -1,0 +1,18 @@
+{
+  email {$ACME_EMAIL}
+}
+
+{$APP_DOMAIN} {
+  encode gzip zstd
+
+  request_body {
+    max_size 60MB
+  }
+
+  @blocked_paths {
+    path /metrics /metrics/*
+  }
+  respond @blocked_paths 403
+
+  reverse_proxy api:8000
+}

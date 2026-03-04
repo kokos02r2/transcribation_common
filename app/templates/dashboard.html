@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Сервис транскрипции | Личный кабинет</title>
+    <link rel="icon" type="image/png" href="/static/img/favicon.png" />
+
+    <!-- Google Font -->
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css?family=Source+Sans+Pro:300,400,400i,700&display=fallback"
+    />
+    <!-- Font Awesome -->
+    <link rel="stylesheet" href="/static/css/all.min.css" />
+    <!-- AdminLTE -->
+    <link rel="stylesheet" href="/static/css/adminlte.min.css" />
+    <!-- Кастомные стили -->
+    <link rel="stylesheet" href="/static/css/dashboard.css" />
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  </head>
+  <body class="hold-transition layout-top-nav">
+    <div class="wrapper">
+      <nav
+        class="main-header navbar navbar-expand-md navbar-light navbar-white"
+      >
+        <div class="container">
+          <a href="#" class="navbar-brand">
+            <img
+              src="/static/img/lion_logo.png"
+              alt="Logo"
+              style="opacity: 0.8; width: 50px; height: 50px"
+            />
+            <span class="brand-text font-weight-light">{{ username }}</span>
+          </a>
+
+          <button
+            class="navbar-toggler order-1"
+            type="button"
+            data-toggle="collapse"
+            data-target="#navbarCollapse"
+            aria-controls="navbarCollapse"
+            aria-expanded="false"
+            aria-label="Toggle navigation"
+          >
+            <span class="navbar-toggler-icon"></span>
+          </button>
+
+          <div class="collapse navbar-collapse order-3" id="navbarCollapse">
+            <ul class="navbar-nav">
+              <li class="nav-item">
+                <a href="/dashboard" class="nav-link">Статистика</a>
+              </li>
+              {% if is_superuser %}
+              <li class="nav-item">
+                <a href="/admin/dashboard" class="nav-link">Админ</a>
+              </li>
+              {% endif %}
+            </ul>
+          </div>
+
+          <ul class="order-1 order-md-3 navbar-nav navbar-no-expand ml-auto">
+            <li class="nav-item">
+              <button id="logoutBtn" class="btn nav-link" title="Logout">
+                <i class="fas fa-sign-out-alt"></i> Выход
+              </button>
+            </li>
+          </ul>
+        </div>
+      </nav>
+
+      <div class="content-wrapper">
+        <div class="content-header">
+          <div class="container">
+            <div class="row mb-2">
+              <div class="col-sm-6">
+                <h1 class="m-0 ml-3">Статистика</h1>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="content">
+          <div class="container">
+            <div class="row">
+              <div class="col-lg-12">
+                <div class="card">
+                  <div class="card-body">
+                    <h5 class="card-title large-title">
+                      Расход за период:
+                      <span id="cost" class="large-cost">0</span> руб.
+                    </h5>
+                    <br /><br />
+                    
+                    <!-- Новая форма выбора дат -->
+                    <form id="dateForm" class="mb-3">
+                      <div class="row">
+                        <div class="col-md-6 col-12">
+                          <label for="startDate">Начальная дата:</label>
+                          <input
+                            type="date"
+                            id="startDate"
+                            class="form-control"
+                            required
+                          />
+                        </div>
+                        <div class="col-md-6 col-12">
+                          <label for="endDate">Конечная дата:</label>
+                          <input
+                            type="date"
+                            id="endDate"
+                            class="form-control"
+                            required
+                          />
+                        </div>
+                      </div>
+                    </form>
+
+                    <!-- Статистика в карточках -->
+                    <div class="row mb-4">
+                      <div class="col-md-4">
+                        <div class="card">
+                          <div class="card-body">
+                            <h5 class="card-title">Минуты без речи</h5>
+                            <p class="card-text display-6" id="noSpeechMinutes">0</p>
+                          </div>
+                        </div>
+                      </div>
+                      <div class="col-md-4">
+                        <div class="card">
+                          <div class="card-body">
+                            <h5 class="card-title">Минуты транскрипция</h5>
+                            <p class="card-text display-6" id="speechTranscriptionMinutes">0</p>
+                          </div>
+                        </div>
+                      </div>
+                      <div class="col-md-4">
+                        <div class="card">
+                          <div class="card-body">
+                            <h5 class="card-title">Общее количество минут</h5>
+                            <p class="card-text display-6" id="totalMinutes">0</p>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div class="chart-container">
+                      <canvas id="minutesChart"></canvas>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <footer class="main-footer">
+        <strong
+          >© 2025, <a href="https://ccrafters.ru/">CodeCrafters</a></strong
+        >
+      </footer>
+    </div>
+
+    <script src="/static/js/jquery.min.js"></script>
+    <script src="/static/js/bootstrap.bundle.min.js"></script>
+    <script src="/static/js/adminlte.min.js"></script>
+    <script src="/static/js/dashboard.js"></script>
+  </body>
+</html>

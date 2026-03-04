@@ -1,0 +1,57 @@
+.chart-container {
+  position: relative;
+  margin: 20px 0; /* Отступы сверху и снизу */
+  padding: 15px; /* Внутренний отступ */
+  border: 1px solid #e0e0e0; /* Рамка */
+  border-radius: 5px; /* Закругленные углы */
+  background-color: #fff; /* Белый фон для контраста */
+  max-width: 100%; /* Ограничение ширины */
+}
+
+#minutesChart {
+  width: 100% !important; /* Убедимся, что график занимает контейнер */
+  height: 400px !important; /* Фиксированная высота */
+}
+/* Увеличение заголовка "Статистика использования минут" */
+.main-footer {
+  text-align: center !important; /* Выравнивание текста по центру */
+}
+
+.large-title {
+  font-size: 1.5rem; /* Увеличиваем размер (примерно 28px) */
+}
+
+/* Увеличение и выделение "Стоимость" и значения */
+.large-cost {
+  font-size: 1.5rem; /* Увеличиваем размер (примерно 24px) */
+  font-weight: bold; /* Делаем жирным */
+}
+
+.card-body {
+  text-align: left !important; /* Перебиваем возможное центрирование от AdminLTE */
+}
+  
+/* Адаптивность формы */
+@media (max-width: 767px) {
+  #monthForm .row > div {
+    margin-bottom: 15px; /* Отступ между элементами на мобильных */
+  }
+}
+
+/* График */
+#minutesChart {
+  width: 100% !important; /* Растягиваем на всю ширину контейнера */
+  max-height: 400px; /* Ограничиваем высоту */
+}
+
+/* Текст статистики */
+#stats p {
+  margin-bottom: 10px;
+}
+
+/* Улучшение читаемости на больших экранах */
+@media (min-width: 768px) {
+  #stats {
+    font-size: 1.1rem;
+  }
+}

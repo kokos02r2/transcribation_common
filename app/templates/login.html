@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Сервис транскрипции | Личный кабинет</title>
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css?family=Source+Sans+Pro:300,400,400i,700&display=fallback"
+    />
+    <link rel="stylesheet" href="/static/css/all.min.css" />
+    <link rel="stylesheet" href="/static/css/adminlte.min.css" />
+  </head>
+  <body class="hold-transition login-page">
+    <div class="login-box">
+      <div class="login-logo">
+        <a href="#"><b>Личный кабинет</b></a>
+      </div>
+      <div class="card">
+        <div class="card-body login-card-body">
+          <p class="login-box-msg">Введите ваши логин и пароль</p>
+          <form id="loginForm">
+            <div class="input-group mb-3">
+              <input
+                type="email"
+                id="email"
+                class="form-control"
+                placeholder="Почта"
+                required
+              />
+              <div class="input-group-append">
+                <div class="input-group-text">
+                  <span class="fas fa-envelope"></span>
+                </div>
+              </div>
+            </div>
+            <div class="input-group mb-3">
+              <input
+                type="password"
+                id="password"
+                class="form-control"
+                placeholder="Пароль"
+                required
+              />
+              <div class="input-group-append">
+                <div class="input-group-text">
+                  <span class="fas fa-lock"></span>
+                </div>
+              </div>
+            </div>
+            <div class="row">
+              <div class="col-12">
+                <button type="submit" class="btn btn-primary btn-block">
+                  Войти
+                </button>
+              </div>
+            </div>
+          </form>
+          <div
+            id="errorMsg"
+            class="text-danger mt-2"
+            style="display: none"
+          ></div>
+        </div>
+      </div>
+    </div>
+
+    <script src="/static/js/jquery.min.js"></script>
+    <script src="/static/js/bootstrap.bundle.min.js"></script>
+    <script src="/static/js/adminlte.min.js"></script>
+
+    <script>
+      document
+        .getElementById("loginForm")
+        .addEventListener("submit", async (e) => {
+          e.preventDefault();
+          const email = document.getElementById("email").value;
+          const password = document.getElementById("password").value;
+          const errorMsg = document.getElementById("errorMsg");
+
+          try {
+            const response = await fetch("/auth/jwt/login", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/x-www-form-urlencoded",
+              },
+              body: new URLSearchParams({
+                username: email,
+                password: password,
+              }),
+              credentials: "include", // Отправляем и принимаем cookie
+            });
+
+            if (!response.ok) {
+              const errorData = await response.json();
+              throw new Error(errorData.detail || "Ошибка авторизации");
+            }
+
+            // Cookie устанавливается сервером, просто редиректим
+            window.location.href = "/dashboard";
+          } catch (error) {
+            errorMsg.textContent = error.message;
+            errorMsg.style.display = "block";
+          }
+        });
+    </script>
+  </body>
+</html>

@@ -1,0 +1,43 @@
+services:
+  api:
+    image: ${APP_IMAGE:?set APP_IMAGE}:${IMAGE_TAG:-latest}
+    restart: always
+    env_file:
+      - ./.env
+    command: ["poetry", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers"]
+    volumes:
+      - shared_temporary_files:/app/temporary_files
+      - shared_temp:/app/temp
+    expose:
+      - "8000"
+
+  worker:
+    image: ${APP_IMAGE:?set APP_IMAGE}:${IMAGE_TAG:-latest}
+    restart: always
+    env_file:
+      - ./.env
+    command: ["poetry", "run", "celery", "-A", "app.tasks", "worker", "--loglevel=info"]
+    volumes:
+      - shared_temporary_files:/app/temporary_files
+      - shared_temp:/app/temp
+
+  caddy:
+    image: caddy:2.10
+    restart: always
+    env_file:
+      - ./.env
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile.prod:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
+
+volumes:
+  caddy_data:
+  caddy_config:
+  shared_temporary_files:
+  shared_temp:
