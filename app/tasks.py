@@ -2,7 +2,6 @@ import json
 import os
 import mimetypes
 import time
-import asyncio
 import re
 import gc
 import signal
@@ -27,7 +26,6 @@ from contextlib import contextmanager
 
 from app.core.logging_config import setup_logging
 from app.utils.webhook_sender import send_webhook_with_retries
-from app.utils.silero_vad import has_speech_async
 from app.utils.client_s3 import upload_to_s3
 
 load_dotenv()
@@ -666,26 +664,7 @@ def transcribe_and_send_webhook_task(self, file_path: str, webhook_url: str, str
 
         logger.info(f"✅ Разбито на {len(chunks)} сегментов.")
 
-        filtered_chunks = []
-        for chunk in chunks:
-            if asyncio.run(has_speech_async(chunk)):
-                filtered_chunks.append(chunk)
-            else:
-                os.remove(chunk)
-
-        logger.info(f"✅ Оставлено {len(filtered_chunks)} сегментов с речью.")
-
-        if not filtered_chunks:
-            logger.warning("⚠️ В аудиофайле нет сегментов с речью.")
-            try:
-                import shutil
-                shutil.rmtree(output_folder)
-                os.remove(file_path)
-            except Exception as e:
-                logger.warning(f"⚠️ Ошибка очистки: {str(e)}")
-            return {"status": "empty_audio"}
-
-        transcribe_tasks = group(transcribe_audio_task.s(chunk) for chunk in filtered_chunks)
+        transcribe_tasks = group(transcribe_audio_task.s(chunk) for chunk in chunks)
         chain_result = chain(
             transcribe_tasks,
             merge_transcriptions_task.s(file_path, webhook_url, stream_id, self.request.id)
@@ -768,15 +747,6 @@ def transcribe_full_audio_task(self, file_path: str, webhook_url: str, stream_id
             return {"status": "failed", "error": f"File {file_path} not found"}
 
         logger.info(f"🔹 Отправляем файл {file_path} целиком в OpenAI Whisper API. Task ID: {self.request.id}")
-
-        # Проверяем наличие речи в файле
-        if not asyncio.run(has_speech_async(file_path)):
-            logger.warning("⚠️ В аудиофайле не обнаружено речи.")
-            try:
-                os.remove(file_path)
-            except Exception as e:
-                logger.warning(f"⚠️ Ошибка удаления файла: {str(e)}")
-            return {"status": "empty_audio"}
 
         # Инициализируем клиент OpenAI
         client = OpenAI(api_key=OPENAI_API_KEY)
@@ -1106,7 +1076,7 @@ def _transcribe_with_elevenlabs(audio_data: bytes, file_path: str) -> dict:
 
 
 @celery.task(bind=True)
-def transcribe_elevenlabs_task(self, file_path: str, webhook_url: str, stream_id: str, has_speech: bool = True):
+def transcribe_elevenlabs_task(self, file_path: str, webhook_url: str, stream_id: str):
     """
     Транскрибирует аудио через выбранный сервис и отправляет результат в вебхук.
 
@@ -1114,51 +1084,8 @@ def transcribe_elevenlabs_task(self, file_path: str, webhook_url: str, stream_id
         file_path: Путь к аудиофайлу
         webhook_url: URL для отправки результата
         stream_id: Идентификатор потока
-        has_speech: Флаг, указывающий наличие речи в аудио (если False, транскрибация пропускается)
     """
     try:
-        # Если речи нет, сразу возвращаем пустой результат
-        if not has_speech:
-            logger.info(
-                f"🔹 Пропускаем транскрибацию файла {file_path}, так как речь отсутствует. "
-                f"Task ID: {self.request.id}"
-            )
-            
-            # Добавляем небольшую задержку (2 секунды), чтобы дать время на сохранение токена в Redis
-            logger.info("⏳ Ожидаем 2 секунды для сохранения токена в Redis...")
-            time.sleep(2)
-            
-            # Получаем информацию о вебхуке, включая флаг is_finished
-            webhook_info = redis_client.get(f"webhook:{self.request.id}")
-            is_finished = False
-            if webhook_info:
-                try:
-                    webhook_data = json.loads(webhook_info)
-                    is_finished = webhook_data.get("is_finished", False)
-                except Exception as e:
-                    logger.warning(f"⚠️ Ошибка при получении данных вебхука: {str(e)}")
-            
-            # Отправляем результат через вебхук
-            result_data = {
-                "stream_id": stream_id,
-                "text": "",
-                "type": "transcription",
-                "speaker_count": 0,
-                "is_finished": is_finished
-            }
-            
-            # Используем функцию send_webhook_with_retries вместо прямой отправки
-            send_webhook_with_retries(webhook_url, result_data, self.request.id)
-            
-            # Удаляем файл, так как обработка завершена
-            try:
-                os.remove(file_path)
-                logger.info(f"🗑 Файл {file_path} успешно удалён.")
-            except Exception as e:
-                logger.warning(f"⚠️ Ошибка удаления файла: {str(e)}")
-                
-            return {"status": "completed", "text": "", "speaker_count": 0}
-
         if not os.path.exists(file_path):
             logger.error(f"❌ Файл {file_path} не найден перед обработкой!")
             return {"status": "failed", "error": f"File {file_path} not found"}

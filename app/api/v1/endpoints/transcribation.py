@@ -16,7 +16,6 @@ from app.models import APIToken, WebhookToken
 from pydub import AudioSegment
 from app.models.audiolog import AudioLog
 from app.tasks import celery, transcribe_audio_task, transcribe_elevenlabs_task
-from app.utils.silero_vad import has_speech_async
 from app.utils.webhook_url_validator import validate_webhook_url
 from app.utils.token_checker import validate_api_token
 from app.core.logging_config import setup_logging
@@ -107,38 +106,21 @@ async def transcribe_audio(
         raw_duration = round(duration_seconds)
         duration_seconds = round_duration(raw_duration)
 
-        # Проверяем, есть ли речь в файле
-        has_speech = await has_speech_async(unique_file_path)
         log_entry = AudioLog(
             user_login=token_user_email,
             file_name=original_filename,
             duration_seconds=duration_seconds,
             created_at=datetime.now(timezone.utc).replace(tzinfo=None),
-            has_speech=has_speech,
+            has_speech=None,
             processing_type="transcription"
         )
-
-        # if not has_speech:
-        #     logger.info(
-        #         f"🔇 Файл без речи: {unique_file_path}. Task не создается, файл удаляется."
-        #     )
-        #     session.add(log_entry)
-        #     await session.commit()
-        #     # Удаляем файл, так как обработка завершена
-        #     os.remove(unique_file_path)
-        #     return {
-        #         "status": "no_speech",
-        #         "message": "Файл не содержит речи",
-        #         "file_name": file.filename,
-        #         "duration_seconds": duration_seconds
-        #     }
 
         # 3️⃣ Авто-усиление громкости
         boosted_file_path = auto_boost_volume(unique_file_path)
 
         # Запускаем задачу
         if webhook_url:
-            task = transcribe_elevenlabs_task.delay(boosted_file_path, webhook_url, stream_id, has_speech)
+            task = transcribe_elevenlabs_task.delay(boosted_file_path, webhook_url, stream_id)
             webhook_data = {
                 "url": webhook_url,
                 "stream_id": stream_id,
