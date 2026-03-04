@@ -128,6 +128,7 @@ jobs:
           username: ${{ secrets.TIMEWEB_USER }}
           key: ${{ secrets.TIMEWEB_SSH_KEY }}
           port: ${{ secrets.TIMEWEB_SSH_PORT }}
+          command_timeout: 120m
           envs: APP_IMAGE,IMAGE_TAG,DEPLOY_ENV_FILE,GHCR_USERNAME,GHCR_TOKEN
           script: |
             set -euo pipefail
