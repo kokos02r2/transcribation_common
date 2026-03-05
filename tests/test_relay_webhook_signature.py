@@ -239,6 +239,32 @@ def test_invalid_relay_envelope_payload_type_returns_400(client):
     assert response.json() == {"detail": "Invalid webhook payload"}
 
 
+def test_no_client_webhook_configured_skips_downstream_send(client, monkeypatch):
+    called = {"value": False}
+
+    def _should_not_send(*_args, **_kwargs):
+        called["value"] = True
+        return {"status": "success"}
+
+    monkeypatch.setattr(transcribation_module, "send_webhook_with_retries", _should_not_send)
+
+    payload = {
+        "event_id": "evt-no-webhook-1",
+        "received_at": "2026-03-04T21:42:04Z",
+        "source_signature_valid": True,
+        "correlation_id": "corr-no-webhook-1",
+        "payload": _base_payload(),
+    }
+    raw_body = json.dumps(payload).encode()
+    headers = _build_headers(raw_body, int(time.time()), "relay-secret")
+
+    response = client.post("/webhooks/elevenlabs", content=raw_body, headers=headers)
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "accepted"
+    assert called["value"] is False
+
+
 def test_downstream_receives_raw_relay_payload(client, monkeypatch):
     captured = {}
 

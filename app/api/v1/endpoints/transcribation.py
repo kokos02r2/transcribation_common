@@ -275,6 +275,9 @@ async def transcribe_audio(
             detail=f"Invalid file format: {file_extension}. Only WAV format is allowed.",
         )
 
+    webhook_url = webhook_url.strip() if isinstance(webhook_url, str) else webhook_url
+    webhook_url = webhook_url or None
+
     if webhook_url:
         try:
             webhook_url = validate_webhook_url(
@@ -368,6 +371,9 @@ async def transcribe_large_audio(
             status_code=400,
             detail=f"Invalid file format: {file_extension}. Only WAV format is allowed.",
         )
+
+    webhook_url = webhook_url.strip() if isinstance(webhook_url, str) else webhook_url
+    webhook_url = webhook_url or None
 
     if webhook_url:
         try:
@@ -571,6 +577,10 @@ async def receive_elevenlabs_webhook(request: Request):
             payload,
             task_id,
             raw_payload=raw_body,
+        )
+    else:
+        logger.info(
+            f"ℹ️ No client webhook configured for task_id={task_id}; result available via status polling"
         )
 
     return {"status": "accepted", "task_id": task_id, "state": "completed"}
