@@ -75,9 +75,7 @@ async function loadStats(startDate, endDate) {
     const formattedDates = allDates.map(date => formatDate(date.toISOString().split('T')[0]));
     
     // Инициализируем массивы для всех дат нулями
-    const totalMinutes = new Array(allDates.length).fill(0);
     const speechTranscriptionMinutes = new Array(allDates.length).fill(0);
-    const noSpeechMinutes = new Array(allDates.length).fill(0);
     const dailyRevenueInRubles = new Array(allDates.length).fill(0);
 
     // Заполняем данные из ответа сервера
@@ -87,16 +85,12 @@ async function loadStats(startDate, endDate) {
         );
         
         if (dateIndex !== -1) {
-            let dayTotal = 0;
             let daySpeech = 0;
-            let dayNoSpeech = 0;
             let dayRevenue = 0;
 
             for (const processingType in dayData) {
                 const { speech, no_speech } = dayData[processingType];
-                dayTotal += speech + no_speech;
                 daySpeech += speech;
-                dayNoSpeech += no_speech;
 
                 // Расчет стоимости
                 const noSpeechRate = 0.2;
@@ -111,17 +105,13 @@ async function loadStats(startDate, endDate) {
                 }
             }
 
-            totalMinutes[dateIndex] = dayTotal;
             speechTranscriptionMinutes[dateIndex] = daySpeech;
-            noSpeechMinutes[dateIndex] = dayNoSpeech;
             dailyRevenueInRubles[dateIndex] = dayRevenue;
         }
     });
 
     // Обновляем статистику
-    document.getElementById("totalMinutes").textContent = totalMinutes.reduce((a, b) => a + b, 0).toFixed(2);
     document.getElementById("speechTranscriptionMinutes").textContent = speechTranscriptionMinutes.reduce((a, b) => a + b, 0).toFixed(2);
-    document.getElementById("noSpeechMinutes").textContent = noSpeechMinutes.reduce((a, b) => a + b, 0).toFixed(2);
     document.getElementById("cost").textContent = dailyRevenueInRubles.reduce((a, b) => a + b, 0).toFixed(2);
 
     if (chart) chart.destroy();
@@ -133,13 +123,6 @@ async function loadStats(startDate, endDate) {
       data: {
         labels: formattedDates,
         datasets: [
-          {
-            label: "Всего минут",
-            data: totalMinutes,
-            backgroundColor: "rgba(75, 192, 192, 0.6)",
-            borderColor: "rgba(75, 192, 192, 1)",
-            borderWidth: 1,
-          },
           {
             label: "Минуты с транскрипцией",
             data: speechTranscriptionMinutes,
@@ -155,13 +138,6 @@ async function loadStats(startDate, endDate) {
             borderWidth: 1,
             type: 'line',
             yAxisID: 'y1',
-          },
-          {
-            label: "Минуты без речи",
-            data: noSpeechMinutes,
-            backgroundColor: "rgba(255, 99, 132, 0.6)",
-            borderColor: "rgba(255, 99, 132, 1)",
-            borderWidth: 1,
           },
         ],
       },
