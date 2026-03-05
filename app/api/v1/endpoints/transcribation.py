@@ -81,6 +81,13 @@ def _build_temp_file_path(original_filename: str) -> str:
     return os.path.join(TEMP_FOLDER, f"{uuid.uuid4().hex}{extension}")
 
 
+def _build_large_s3_object_key(original_filename: str) -> str:
+    extension = os.path.splitext(os.path.basename(original_filename or ""))[1].lower()
+    if not extension or len(extension) > 16:
+        extension = ".bin"
+    return f"large/{uuid.uuid4().hex}{extension}"
+
+
 def _sanitize_file_name(file_name: str) -> str:
     cleaned = os.path.basename((file_name or "").strip())
     if not cleaned:
@@ -559,7 +566,7 @@ async def transcribe_large_audio(
                 ),
             )
 
-        s3_object_key = f"large/{uuid.uuid4().hex}_{original_filename}"
+        s3_object_key = _build_large_s3_object_key(original_filename)
         upload_to_s3(temp_file_path, s3_object_key)
         _safe_remove_file(temp_file_path)
 
