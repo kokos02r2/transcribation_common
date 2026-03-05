@@ -108,12 +108,15 @@ curl -X POST "https://<YOUR_DOMAIN>/admin/users" \
 - Ограничения: только `.wav`, до `50 MB`, до `15 минут`.
 
 Для `POST /transcribe/large`:
-- `multipart/form-data`, поле `file` обязательно.
+- `multipart/form-data`, нужно передать **ровно один** источник:
+  - либо поле `file`,
+  - либо поле `cloud_storage_url`.
 - Дополнительно: `webhook_url`, `stream_id`, `is_finished`.
-- Ограничения: до `1 GB`, ограничение по длительности отсутствует.
+- Ограничения для `file`: до `1 GB`, ограничение по длительности отсутствует.
+- Если размер `file` больше `20 MB`, endpoint возвращает ошибку с требованием использовать `cloud_storage_url`.
 - Убедитесь, что reverse-proxy принимает тела такого размера (в Caddy: `request_body.max_size`).
-- Файл принимается потоково (чанками), сохраняется временно на диск и загружается в S3.
-- Файл отправляется в ElevenLabs без локальной конвертации/предобработки.
+- Для `file`: файл принимается потоково (чанками), сохраняется временно на диск и загружается в S3.
+- Для `cloud_storage_url`: ссылка передается в ElevenLabs как `cloud_storage_url`.
 - Endpoint возвращает `task_id`, а финальный статус/результат проверяется через `/transcribe/status/{task_id}`.
 
 ### Настройка ElevenLabs callback для `/transcribe/large`

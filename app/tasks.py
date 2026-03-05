@@ -32,7 +32,7 @@ from app.utils.large_transcription_state import (
     update_large_task,
 )
 from app.utils.webhook_sender import send_webhook_with_retries
-from app.utils.client_s3 import upload_to_s3
+from app.utils.client_s3 import generate_presigned_download_url, upload_to_s3
 
 load_dotenv()
 logger = setup_logging()
@@ -80,6 +80,7 @@ ELEVENLABS_STT_API_URL = os.getenv("ELEVENLABS_STT_API_URL", "https://api.eleven
 ELEVENLABS_STT_MODEL_ID = os.getenv("ELEVENLABS_STT_MODEL_ID", "scribe_v2")
 ELEVENLABS_WEBHOOK_ID = os.getenv("ELEVENLABS_WEBHOOK_ID")
 ELEVENLABS_LANGUAGE_CODE = os.getenv("ELEVENLABS_LANGUAGE_CODE", "ru")
+ELEVENLABS_CLOUD_URL_EXPIRES_SECONDS = int(os.getenv("ELEVENLABS_CLOUD_URL_EXPIRES_SECONDS", "3600"))
 # Инициализация Gemini
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL_NAME = os.getenv("GEMINI_MODEL_NAME", "gemini-3-flash-preview")
@@ -1105,15 +1106,25 @@ def _transcribe_with_elevenlabs(audio_data: bytes, file_path: str) -> dict:
 
 
 @celery.task(bind=True)
-def submit_large_elevenlabs_task(self, file_path: str, task_id: str, callback_token: str):
+def submit_large_elevenlabs_task(
+    self,
+    file_path: str | None,
+    task_id: str,
+    callback_token: str,
+    s3_object_key: str | None = None,
+    cloud_storage_url: str | None = None,
+):
     """
     Отправляет большой файл в ElevenLabs в webhook-режиме.
     Финальный результат приходит на внутренний endpoint /webhooks/elevenlabs.
     """
+    local_file_path = file_path or ""
+    use_cloud_storage = bool(s3_object_key or cloud_storage_url)
+
     try:
-        if not os.path.exists(file_path):
-            _mark_large_task_failed(task_id, f"File {file_path} not found")
-            return {"status": "failed", "error": f"File {file_path} not found"}
+        if not use_cloud_storage and not os.path.exists(local_file_path):
+            _mark_large_task_failed(task_id, f"File {local_file_path} not found")
+            return {"status": "failed", "error": f"File {local_file_path} not found"}
 
         if not ELEVENLABS_API_KEY:
             _mark_large_task_failed(task_id, "ELEVENLABS_API_KEY не задан")
@@ -1140,22 +1151,38 @@ def submit_large_elevenlabs_task(self, file_path: str, task_id: str, callback_to
         headers = {"xi-api-key": ELEVENLABS_API_KEY}
         proxy_kwargs = _build_requests_proxy_kwargs()
 
-        with open(file_path, "rb") as audio_file:
-            files = {
-                "file": (
-                    os.path.basename(file_path),
-                    audio_file,
-                    _guess_mime_type(file_path),
+        request_kwargs = {
+            "headers": headers,
+            "data": data,
+            "timeout": 600,
+            **proxy_kwargs,
+        }
+        if use_cloud_storage:
+            if cloud_storage_url:
+                data["cloud_storage_url"] = cloud_storage_url
+            else:
+                data["cloud_storage_url"] = generate_presigned_download_url(
+                    str(s3_object_key),
+                    ELEVENLABS_CLOUD_URL_EXPIRES_SECONDS,
                 )
-            }
             response = requests.post(
                 ELEVENLABS_STT_API_URL,
-                headers=headers,
-                data=data,
-                files=files,
-                timeout=600,
-                **proxy_kwargs,
+                **request_kwargs,
             )
+        else:
+            with open(local_file_path, "rb") as audio_file:
+                files = {
+                    "file": (
+                        os.path.basename(local_file_path),
+                        audio_file,
+                        _guess_mime_type(local_file_path),
+                    )
+                }
+                response = requests.post(
+                    ELEVENLABS_STT_API_URL,
+                    files=files,
+                    **request_kwargs,
+                )
 
         response_text = response.text[:1000]
         if not response.ok:
@@ -1207,12 +1234,13 @@ def submit_large_elevenlabs_task(self, file_path: str, task_id: str, callback_to
         _mark_large_task_failed(task_id, error_message)
         return {"status": "failed", "error": error_message}
     finally:
-        try:
-            if os.path.exists(file_path):
-                os.remove(file_path)
-                logger.info(f"🗑 Файл {file_path} удалён после отправки в ElevenLabs.")
-        except Exception as exc:
-            logger.warning(f"⚠️ Ошибка удаления файла {file_path}: {exc}")
+        if not use_cloud_storage:
+            try:
+                if local_file_path and os.path.exists(local_file_path):
+                    os.remove(local_file_path)
+                    logger.info(f"🗑 Файл {local_file_path} удалён после отправки в ElevenLabs.")
+            except Exception as exc:
+                logger.warning(f"⚠️ Ошибка удаления файла {local_file_path}: {exc}")
 
 
 @celery.task(bind=True)

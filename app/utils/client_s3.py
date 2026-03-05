@@ -4,7 +4,9 @@ import hmac
 import mimetypes
 import os
 
+import boto3
 import requests
+from botocore.client import Config
 from dotenv import load_dotenv
 
 from app.core.logging_config import setup_logging
@@ -18,6 +20,39 @@ S3_ACCESS_KEY = os.getenv("S3_ACCESS_KEY")
 S3_SECRET_KEY = os.getenv("S3_SECRET_KEY")
 S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
 S3_REGION = "ru-1"  # Регион Timeweb
+
+
+def _get_s3_client():
+    if not S3_ACCESS_KEY or not S3_SECRET_KEY or not S3_BUCKET_NAME:
+        raise RuntimeError("S3 credentials are not configured")
+    return boto3.client(
+        "s3",
+        endpoint_url=S3_ENDPOINT,
+        aws_access_key_id=S3_ACCESS_KEY,
+        aws_secret_access_key=S3_SECRET_KEY,
+        region_name=S3_REGION,
+        config=Config(signature_version="s3v4"),
+    )
+
+
+def build_s3_object_url(file_name: str) -> str:
+    normalized_key = (file_name or "").lstrip("/")
+    if not normalized_key:
+        raise RuntimeError("S3 object key is empty")
+    return f"{S3_ENDPOINT}/{S3_BUCKET_NAME}/{normalized_key}"
+
+
+def generate_presigned_download_url(file_name: str, expires_seconds: int) -> str:
+    normalized_key = (file_name or "").lstrip("/")
+    if not normalized_key:
+        raise RuntimeError("S3 object key is empty")
+
+    s3_client = _get_s3_client()
+    return s3_client.generate_presigned_url(
+        "get_object",
+        Params={"Bucket": S3_BUCKET_NAME, "Key": normalized_key},
+        ExpiresIn=max(int(expires_seconds), 60),
+    )
 
 
 def sign(key, msg):

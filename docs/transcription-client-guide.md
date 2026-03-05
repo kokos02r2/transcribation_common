@@ -60,16 +60,19 @@ curl -X POST "https://speech.tw1.ru/transcribe" \
 
 Поля формы:
 
-- `file` (обязательно): аудио/видео-файл
+- `file` (опционально): аудио/видео-файл
+- `cloud_storage_url` (опционально): публично доступная ссылка на файл в облаке
 - `webhook_url` (необязательно): URL для callback клиенту
 - `stream_id` (необязательно): ваш ID потока
 - `is_finished` (необязательно): `true` или `false`
 
 Ограничения:
 
+- Нужно передать ровно один источник: `file` или `cloud_storage_url`
 - Максимальный размер файла: `1 GB`
 - Ограничение по длительности отсутствует
 - Локальной проверки формата/длительности нет: файл отправляется в ElevenLabs как есть
+- Если `file` больше `20 MB`, endpoint вернет ошибку: используйте `cloud_storage_url`
 - Если `webhook_url` не передан (или передан пустой строкой), сервис не отправляет callback клиенту:
   результат доступен через polling `GET /transcribe/status/{task_id}`.
 
@@ -91,6 +94,17 @@ curl -X POST "https://speech.tw1.ru/transcribe/large" \
   "task_id": "8a8afdb6-4d59-4e96-9cf8-8fb88f8f25a4",
   "status": "processing"
 }
+```
+
+Пример запуска по ссылке на облако клиента:
+
+```bash
+curl -X POST "https://speech.tw1.ru/transcribe/large" \
+  -H "Authorization: Bearer <ВАШ_API_TOKEN>" \
+  -F "cloud_storage_url=https://storage.example.com/path/large_audio.webm?sig=..." \
+  -F "webhook_url=https://client.example.com/hooks/transcribe" \
+  -F "stream_id=dialog-large-2" \
+  -F "is_finished=true"
 ```
 
 ## 3. Получение результата по `task_id` (polling)

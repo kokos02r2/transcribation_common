@@ -5,6 +5,7 @@ import os
 import secrets
 import time
 import uuid
+import urllib.parse
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Optional
@@ -30,7 +31,10 @@ from app.tasks import (
     transcribe_elevenlabs_task,
 )
 from app.utils.add_volume import auto_boost_volume
-from app.utils.client_s3 import upload_to_s3
+from app.utils.client_s3 import (
+    build_s3_object_url,
+    upload_to_s3,
+)
 from app.utils.large_transcription_state import (
     LARGE_TRANSCRIPTION_TTL_SECONDS,
     get_large_task,
@@ -56,6 +60,7 @@ LARGE_MAX_FILE_SIZE = 1024 * 1024 * 1024
 UPLOAD_CHUNK_SIZE = 4 * 1024 * 1024
 ALLOWED_FORMAT = "wav"
 RELAY_EVENT_PREFIX = "relay_event"
+LARGE_FILE_DIRECT_UPLOAD_LIMIT = 20 * 1024 * 1024
 os.makedirs(TEMP_FOLDER, exist_ok=True)
 redis_client = redis.StrictRedis.from_url(REDIS_URL, decode_responses=True)
 
@@ -74,6 +79,23 @@ def _build_temp_file_path(original_filename: str) -> str:
     if not extension or len(extension) > 16:
         extension = ".bin"
     return os.path.join(TEMP_FOLDER, f"{uuid.uuid4().hex}{extension}")
+
+
+def _sanitize_file_name(file_name: str) -> str:
+    cleaned = os.path.basename((file_name or "").strip())
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="file_name is required")
+    return cleaned
+
+
+def _normalize_cloud_storage_url(cloud_storage_url: str) -> str:
+    url = (cloud_storage_url or "").strip()
+    if not url:
+        raise HTTPException(status_code=400, detail="cloud_storage_url is required")
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise HTTPException(status_code=400, detail="Invalid cloud_storage_url")
+    return url
 
 
 async def _save_upload_file_stream(upload_file: UploadFile, destination: str, max_bytes: int) -> int:
@@ -260,6 +282,79 @@ def _remember_relay_event_once(event_id: str) -> bool:
         return True
 
 
+async def _start_large_transcription(
+    *,
+    token_user_id: int,
+    token_user_email: str,
+    session: AsyncSession,
+    object_key: Optional[str],
+    cloud_storage_url: Optional[str],
+    original_filename: str,
+    file_size_bytes: int,
+    webhook_url: Optional[str],
+    stream_id: Optional[str],
+    is_finished_bool: bool,
+) -> dict:
+    task_id = str(uuid.uuid4())
+    callback_token = secrets.token_urlsafe(32)
+    s3_url = build_s3_object_url(object_key) if object_key else None
+
+    large_state = {
+        "status": "processing",
+        "task_id": task_id,
+        "user_email": token_user_email,
+        "file_name": original_filename,
+        "file_size_bytes": file_size_bytes,
+        "s3_url": s3_url,
+        "s3_object_key": object_key,
+        "source_cloud_storage_url": cloud_storage_url,
+        "client_webhook_url": webhook_url,
+        "stream_id": stream_id,
+        "is_finished": is_finished_bool,
+        "callback_token": callback_token,
+        "processing_type": "transcription_large",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "text": "",
+        "speaker_count": 0,
+        "error": None,
+        "elevenlabs_request_id": None,
+    }
+    set_large_task(redis_client, task_id, large_state, ttl_seconds=LARGE_TRANSCRIPTION_TTL_SECONDS)
+
+    if webhook_url:
+        webhook_data = {
+            "url": webhook_url,
+            "stream_id": stream_id,
+            "is_finished": is_finished_bool,
+        }
+        redis_client.setex(
+            f"webhook:{task_id}",
+            LARGE_TRANSCRIPTION_TTL_SECONDS,
+            json.dumps(webhook_data),
+        )
+        await _cache_signature_token_for_task(task_id, token_user_id, token_user_email, session)
+
+    log_entry = AudioLog(
+        user_login=token_user_email,
+        file_name=original_filename,
+        duration_seconds=0,
+        created_at=datetime.now(timezone.utc).replace(tzinfo=None),
+        has_speech=None,
+        task_id=task_id,
+        processing_type="transcription_large",
+    )
+    session.add(log_entry)
+    await session.commit()
+
+    submit_large_elevenlabs_task.apply_async(
+        args=[None, task_id, callback_token, object_key, cloud_storage_url],
+        task_id=task_id,
+    )
+
+    return {"task_id": task_id, "status": "processing"}
+
+
 @router.post("/transcribe")
 async def transcribe_audio(
     file: UploadFile = File(...),
@@ -363,16 +458,21 @@ async def transcribe_audio(
 
 @router.post("/transcribe/large")
 async def transcribe_large_audio(
-    file: UploadFile = File(...),
+    file: Optional[UploadFile] = File(None),
+    cloud_storage_url: str = Form(None),
+    file_name: str = Form(None),
     webhook_url: str = Form(None),
     stream_id: str = Form(None),
     is_finished: str = Form("false"),
     api_token: APIToken = Depends(validate_api_token),
     session: AsyncSession = Depends(get_async_session),
+    request: Request = None,
 ):
     token_user_id = api_token.user_id
     token_user_email = api_token.user.email
-    original_filename = os.path.basename(file.filename or "uploaded.bin")
+    normalized_cloud_storage_url = (
+        _normalize_cloud_storage_url(cloud_storage_url) if cloud_storage_url else None
+    )
 
     webhook_url = webhook_url.strip() if isinstance(webhook_url, str) else webhook_url
     webhook_url = webhook_url or None
@@ -388,90 +488,86 @@ async def transcribe_large_audio(
             raise HTTPException(status_code=400, detail=str(exc))
 
     is_finished_bool = is_finished.lower() == "true"
-    task_id = str(uuid.uuid4())
-    callback_token = secrets.token_urlsafe(32)
+
+    if bool(file) == bool(normalized_cloud_storage_url):
+        raise HTTPException(
+            status_code=400,
+            detail="Provide exactly one source: multipart file or cloud_storage_url",
+        )
+
+    if normalized_cloud_storage_url:
+        provided_file_name = _sanitize_file_name(file_name) if file_name else ""
+        url_file_name = os.path.basename(urllib.parse.urlparse(normalized_cloud_storage_url).path or "")
+        original_filename = provided_file_name or url_file_name or "cloud_media.bin"
+        return await _start_large_transcription(
+            token_user_id=token_user_id,
+            token_user_email=token_user_email,
+            session=session,
+            object_key=None,
+            cloud_storage_url=normalized_cloud_storage_url,
+            original_filename=original_filename,
+            file_size_bytes=0,
+            webhook_url=webhook_url,
+            stream_id=stream_id,
+            is_finished_bool=is_finished_bool,
+        )
+
+    original_filename = os.path.basename(file.filename or "uploaded.bin")
     temp_file_path = _build_temp_file_path(original_filename)
 
     try:
+        content_length_header = request.headers.get("content-length") if request else None
+        if content_length_header:
+            try:
+                content_length = int(content_length_header)
+                if content_length > LARGE_FILE_DIRECT_UPLOAD_LIMIT:
+                    _safe_remove_file(temp_file_path)
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            "Files larger than 20 MB must be submitted via cloud_storage_url "
+                            "in /transcribe/large"
+                        ),
+                    )
+            except ValueError:
+                pass
+
         file_size = await _save_upload_file_stream(file, temp_file_path, LARGE_MAX_FILE_SIZE)
         if file_size == 0:
             _safe_remove_file(temp_file_path)
             raise HTTPException(status_code=400, detail="Uploaded file is empty")
-
-        s3_file_name = f"large/{task_id}_{original_filename}"
-        s3_url = upload_to_s3(temp_file_path, s3_file_name)
-
-        large_state = {
-            "status": "processing",
-            "task_id": task_id,
-            "user_email": token_user_email,
-            "file_name": original_filename,
-            "file_size_bytes": file_size,
-            "s3_url": s3_url,
-            "client_webhook_url": webhook_url,
-            "stream_id": stream_id,
-            "is_finished": is_finished_bool,
-            "callback_token": callback_token,
-            "processing_type": "transcription_large",
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-            "text": "",
-            "speaker_count": 0,
-            "error": None,
-            "elevenlabs_request_id": None,
-        }
-        set_large_task(redis_client, task_id, large_state, ttl_seconds=LARGE_TRANSCRIPTION_TTL_SECONDS)
-
-        if webhook_url:
-            webhook_data = {
-                "url": webhook_url,
-                "stream_id": stream_id,
-                "is_finished": is_finished_bool,
-            }
-            redis_client.setex(
-                f"webhook:{task_id}",
-                LARGE_TRANSCRIPTION_TTL_SECONDS,
-                json.dumps(webhook_data),
+        if file_size > LARGE_FILE_DIRECT_UPLOAD_LIMIT:
+            _safe_remove_file(temp_file_path)
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Files larger than 20 MB must be submitted via cloud_storage_url "
+                    "in /transcribe/large"
+                ),
             )
-            await _cache_signature_token_for_task(task_id, token_user_id, token_user_email, session)
 
-        log_entry = AudioLog(
-            user_login=token_user_email,
-            file_name=original_filename,
-            duration_seconds=0,
-            created_at=datetime.now(timezone.utc).replace(tzinfo=None),
-            has_speech=None,
-            task_id=task_id,
-            processing_type="transcription_large",
+        s3_object_key = f"large/{uuid.uuid4().hex}_{original_filename}"
+        upload_to_s3(temp_file_path, s3_object_key)
+        _safe_remove_file(temp_file_path)
+
+        return await _start_large_transcription(
+            token_user_id=token_user_id,
+            token_user_email=token_user_email,
+            session=session,
+            object_key=s3_object_key,
+            cloud_storage_url=None,
+            original_filename=original_filename,
+            file_size_bytes=file_size,
+            webhook_url=webhook_url,
+            stream_id=stream_id,
+            is_finished_bool=is_finished_bool,
         )
-        session.add(log_entry)
-        await session.commit()
-
-        submit_large_elevenlabs_task.apply_async(
-            args=[temp_file_path, task_id, callback_token],
-            task_id=task_id,
-        )
-
-        return {
-            "task_id": task_id,
-            "status": "processing",
-        }
     except HTTPException:
         _safe_remove_file(temp_file_path)
         raise
     except Exception as exc:
         logger.error(f"⚠️ Ошибка в эндпоинте /transcribe/large: {exc}")
         _safe_remove_file(temp_file_path)
-        update_large_task(
-            redis_client,
-            task_id,
-            {
-                "status": "failed",
-                "error": str(exc),
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            },
-            ttl_seconds=LARGE_TRANSCRIPTION_TTL_SECONDS,
-        )
         raise HTTPException(status_code=500, detail=str(exc))
 
 
