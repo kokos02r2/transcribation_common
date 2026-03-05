@@ -121,7 +121,7 @@ curl -X GET "https://speech.tw1.ru/transcribe/status/4d5c3f5c-9d7f-4b0a-8df4-9c0
 {
   "task_id": "4d5c3f5c-9d7f-4b0a-8df4-9c0f7e9ceabc",
   "status": "completed",
-  "text": "Текст транскрипции..."
+  "payload": { "payload": { "...": "..." } }
 }
 ```
 

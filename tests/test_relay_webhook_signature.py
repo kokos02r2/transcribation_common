@@ -149,6 +149,7 @@ def test_relay_envelope_with_nested_transcription_and_request_id_mapping(client,
     assert captured["status"] == "completed"
     assert captured["text"] == "hello world"
     assert captured["speaker_count"] == 2
+    assert captured["result_payload"] == payload
 
 
 def test_invalid_signature_returns_401(client):

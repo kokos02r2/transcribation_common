@@ -561,6 +561,7 @@ async def receive_elevenlabs_webhook(request: Request):
             "status": "completed",
             "text": text,
             "speaker_count": speaker_count,
+            "result_payload": payload,
             "error": None,
         }
     )
@@ -604,10 +605,16 @@ async def get_status(
         if large_state:
             state = str(large_state.get("status") or "processing").lower()
             if state == "completed":
+                payload = large_state.get("result_payload")
+                if payload is None:
+                    payload = {
+                        "text": large_state.get("text", ""),
+                        "speaker_count": large_state.get("speaker_count", 0),
+                    }
                 return {
                     "task_id": task_id,
                     "status": "completed",
-                    "text": large_state.get("text", ""),
+                    "payload": payload,
                 }
             if state == "failed":
                 return {
