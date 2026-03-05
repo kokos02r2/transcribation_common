@@ -6,51 +6,51 @@
     <title>Сервис транскрипции | Личный кабинет</title>
     <link
       rel="stylesheet"
-      href="https://fonts.googleapis.com/css?family=Source+Sans+Pro:300,400,400i,700&display=fallback"
+      href="https://fonts.googleapis.com/css2?family=Manrope:wght@500;600;700;800&display=swap"
     />
     <link rel="stylesheet" href="/static/css/all.min.css" />
     <link rel="stylesheet" href="/static/css/adminlte.min.css" />
+    <link rel="stylesheet" href="/static/css/login.css" />
   </head>
-  <body class="hold-transition login-page">
-    <div class="login-box">
-      <div class="login-logo">
-        <a href="#"><b>Личный кабинет</b></a>
+  <body class="hold-transition login-page login-modern">
+    <div class="login-shell">
+      <div class="login-logo login-logo-modern">
+        <h1>Личный кабинет</h1>
+        <p>Вход в сервис транскрипции</p>
       </div>
-      <div class="card">
+      <div class="card login-card-modern">
         <div class="card-body login-card-body">
           <p class="login-box-msg">Введите ваши логин и пароль</p>
-          <form id="loginForm">
-            <div class="input-group mb-3">
+          <form id="loginForm" class="login-form-modern">
+            <div class="form-group mb-3">
+              <label class="form-label login-label" for="email">Почта</label>
+              <div class="input-group-modern">
+                <span class="fas fa-envelope input-icon"></span>
               <input
                 type="email"
                 id="email"
-                class="form-control"
+                class="form-control form-control-modern"
                 placeholder="Почта"
                 required
               />
-              <div class="input-group-append">
-                <div class="input-group-text">
-                  <span class="fas fa-envelope"></span>
-                </div>
               </div>
             </div>
-            <div class="input-group mb-3">
+            <div class="form-group mb-4">
+              <label class="form-label login-label" for="password">Пароль</label>
+              <div class="input-group-modern">
+                <span class="fas fa-lock input-icon"></span>
               <input
                 type="password"
                 id="password"
-                class="form-control"
+                class="form-control form-control-modern"
                 placeholder="Пароль"
                 required
               />
-              <div class="input-group-append">
-                <div class="input-group-text">
-                  <span class="fas fa-lock"></span>
-                </div>
               </div>
             </div>
             <div class="row">
               <div class="col-12">
-                <button type="submit" class="btn btn-primary btn-block">
+                <button type="submit" class="btn btn-primary btn-block btn-login-modern">
                   Войти
                 </button>
               </div>
