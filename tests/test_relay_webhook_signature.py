@@ -60,6 +60,10 @@ def client(monkeypatch):
     )
     monkeypatch.setattr(transcribation_module, "send_webhook_with_retries", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(transcribation_module, "_remember_relay_event_once", lambda *_args, **_kwargs: True)
+    async def _noop_billing(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(transcribation_module, "_update_large_audio_log", _noop_billing)
 
     app = FastAPI()
     app.add_api_route("/webhooks/elevenlabs", transcribation_module.receive_elevenlabs_webhook, methods=["POST"])
@@ -106,6 +110,7 @@ def test_valid_relay_envelope_returns_success(client):
 
 def test_relay_envelope_with_nested_transcription_and_request_id_mapping(client, monkeypatch):
     captured = {}
+    billing_update = {}
 
     def _capture_update(_redis_client, _task_id, updates, **_kwargs):
         captured.update(updates)
@@ -116,7 +121,13 @@ def test_relay_envelope_with_nested_transcription_and_request_id_mapping(client,
             "is_finished": True,
         }
 
+    async def _capture_billing(task_id, duration_seconds, has_speech):
+        billing_update["task_id"] = task_id
+        billing_update["duration_seconds"] = duration_seconds
+        billing_update["has_speech"] = has_speech
+
     monkeypatch.setattr(transcribation_module, "update_large_task", _capture_update)
+    monkeypatch.setattr(transcribation_module, "_update_large_audio_log", _capture_billing)
 
     payload = {
         "event_id": "evt-3",
@@ -131,8 +142,8 @@ def test_relay_envelope_with_nested_transcription_and_request_id_mapping(client,
                 "transcription": {
                     "text": "hello world",
                     "words": [
-                        {"speaker_id": "speaker_0"},
-                        {"speaker_id": "speaker_1"},
+                        {"speaker_id": "speaker_0", "start": 0.0, "end": 12.3},
+                        {"speaker_id": "speaker_1", "start": 12.3, "end": 23.8},
                     ],
                 },
             },
@@ -150,6 +161,8 @@ def test_relay_envelope_with_nested_transcription_and_request_id_mapping(client,
     assert captured["text"] == "hello world"
     assert captured["speaker_count"] == 2
     assert captured["result_payload"] == payload
+    assert captured["duration_seconds"] == 60
+    assert billing_update == {"task_id": "task-1", "duration_seconds": 60, "has_speech": True}
 
 
 def test_relay_webhook_error_marks_failed_and_sends_payload(client, monkeypatch):

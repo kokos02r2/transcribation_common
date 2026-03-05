@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
 from app.core.config import settings
-from app.core.db import get_async_session
+from app.core.db import AsyncSessionLocal, get_async_session
 from app.core.logging_config import setup_logging
 from app.models import APIToken, WebhookToken
 from app.models.audiolog import AudioLog
@@ -237,6 +237,84 @@ def _extract_provider_payload(payload: dict) -> dict:
     if isinstance(nested_payload, dict):
         return nested_payload
     return payload
+
+
+def _coerce_positive_seconds(value: object) -> Optional[float]:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        seconds = float(value)
+    elif isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return None
+        try:
+            seconds = float(value)
+        except ValueError:
+            return None
+    else:
+        return None
+
+    if seconds <= 0:
+        return None
+    return seconds
+
+
+def _extract_duration_seconds(payload: dict) -> int:
+    body = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+    if not isinstance(body, dict):
+        return 0
+
+    transcription = body.get("transcription") if isinstance(body.get("transcription"), dict) else {}
+    duration_candidates = [
+        body.get("duration_seconds"),
+        body.get("audio_duration_seconds"),
+        body.get("duration"),
+        body.get("audio_duration"),
+        transcription.get("duration_seconds"),
+        transcription.get("audio_duration_seconds"),
+        transcription.get("duration"),
+        transcription.get("audio_duration"),
+    ]
+    for candidate in duration_candidates:
+        seconds = _coerce_positive_seconds(candidate)
+        if seconds is not None:
+            return round_duration(round(seconds))
+
+    words = body.get("words")
+    if not isinstance(words, list):
+        words = transcription.get("words")
+    if isinstance(words, list):
+        max_end = 0.0
+        for item in words:
+            if not isinstance(item, dict):
+                continue
+            end_value = _coerce_positive_seconds(item.get("end"))
+            if end_value is not None:
+                max_end = max(max_end, end_value)
+        if max_end > 0:
+            return round_duration(round(max_end))
+
+    return 0
+
+
+async def _update_large_audio_log(task_id: str, duration_seconds: int, has_speech: bool) -> None:
+    if not task_id:
+        return
+    try:
+        async with AsyncSessionLocal() as session:
+            query = select(AudioLog).where(AudioLog.task_id == task_id)
+            result = await session.execute(query)
+            log_entry = result.scalars().first()
+            if not log_entry:
+                return
+
+            if duration_seconds > 0:
+                log_entry.duration_seconds = max(int(log_entry.duration_seconds or 0), int(duration_seconds))
+            log_entry.has_speech = has_speech
+            await session.commit()
+    except Exception as exc:
+        logger.warning(f"⚠️ Не удалось обновить billing-лог для large task_id={task_id}: {exc}")
 
 
 def _verify_relay_signature(headers: Mapping[str, str], raw_body: bytes) -> Optional[str]:
@@ -658,6 +736,7 @@ async def receive_elevenlabs_webhook(request: Request):
             raise HTTPException(status_code=403, detail="Invalid callback token")
 
     text, speaker_count, error_message = _extract_text_and_speaker_count(provider_payload)
+    duration_seconds = _extract_duration_seconds(provider_payload)
 
     updates = {
         "updated_at": datetime.now(timezone.utc).isoformat(),
@@ -696,6 +775,7 @@ async def receive_elevenlabs_webhook(request: Request):
             "status": "completed",
             "text": text,
             "speaker_count": speaker_count,
+            "duration_seconds": duration_seconds,
             "result_payload": payload,
             "error": None,
         }
@@ -718,6 +798,12 @@ async def receive_elevenlabs_webhook(request: Request):
         logger.info(
             f"ℹ️ No client webhook configured for task_id={task_id}; result available via status polling"
         )
+
+    await _update_large_audio_log(
+        task_id=task_id,
+        duration_seconds=duration_seconds,
+        has_speech=bool(text.strip()),
+    )
 
     return {"status": "accepted", "task_id": task_id, "state": "completed"}
 
