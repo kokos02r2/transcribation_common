@@ -98,7 +98,7 @@ curl -X POST "https://<YOUR_DOMAIN>/admin/users" \
 | Метод | Путь | Доступ | Назначение |
 |---|---|---|---|
 | POST | `/transcribe` | API token (`Bearer`) | Отправить WAV-файл на транскрибацию (асинхронно). |
-| POST | `/transcribe/large` | API token (`Bearer`) | Отправить большой WAV-файл в ElevenLabs async webhook flow. |
+| POST | `/transcribe/large` | API token (`Bearer`) | Отправить большой аудио/видео-файл в ElevenLabs async webhook flow. |
 | GET | `/transcribe/status/{task_id}` | API token (`Bearer`) | Проверить статус и результат задачи. |
 | POST | `/webhooks/elevenlabs` | Relay webhook | Внутренний callback endpoint для результата от ElevenLabs (через relay). |
 
@@ -110,9 +110,10 @@ curl -X POST "https://<YOUR_DOMAIN>/admin/users" \
 Для `POST /transcribe/large`:
 - `multipart/form-data`, поле `file` обязательно.
 - Дополнительно: `webhook_url`, `stream_id`, `is_finished`.
-- Ограничения: только `.wav`, до `1 GB`, ограничение по длительности отсутствует.
+- Ограничения: до `1 GB`, ограничение по длительности отсутствует.
 - Убедитесь, что reverse-proxy принимает тела такого размера (в Caddy: `request_body.max_size`).
 - Файл принимается потоково (чанками), сохраняется временно на диск и загружается в S3.
+- Файл отправляется в ElevenLabs без локальной конвертации/предобработки.
 - Endpoint возвращает `task_id`, а финальный статус/результат проверяется через `/transcribe/status/{task_id}`.
 
 ### Настройка ElevenLabs callback для `/transcribe/large`

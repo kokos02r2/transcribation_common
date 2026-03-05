@@ -68,6 +68,14 @@ def _safe_remove_file(file_path: str) -> None:
         logger.warning(f"⚠️ Ошибка при удалении временного файла {file_path}: {exc}")
 
 
+def _build_temp_file_path(original_filename: str) -> str:
+    safe_name = os.path.basename(original_filename or "uploaded.bin")
+    extension = os.path.splitext(safe_name)[1].lower()
+    if not extension or len(extension) > 16:
+        extension = ".bin"
+    return os.path.join(TEMP_FOLDER, f"{uuid.uuid4().hex}{extension}")
+
+
 async def _save_upload_file_stream(upload_file: UploadFile, destination: str, max_bytes: int) -> int:
     total_size = 0
     try:
@@ -364,13 +372,7 @@ async def transcribe_large_audio(
 ):
     token_user_id = api_token.user_id
     token_user_email = api_token.user.email
-    original_filename = os.path.basename(file.filename or "uploaded.wav")
-    file_extension = original_filename.rsplit(".", 1)[-1].lower() if "." in original_filename else ""
-    if file_extension != ALLOWED_FORMAT:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid file format: {file_extension}. Only WAV format is allowed.",
-        )
+    original_filename = os.path.basename(file.filename or "uploaded.bin")
 
     webhook_url = webhook_url.strip() if isinstance(webhook_url, str) else webhook_url
     webhook_url = webhook_url or None
@@ -388,7 +390,7 @@ async def transcribe_large_audio(
     is_finished_bool = is_finished.lower() == "true"
     task_id = str(uuid.uuid4())
     callback_token = secrets.token_urlsafe(32)
-    temp_file_path = os.path.join(TEMP_FOLDER, f"{uuid.uuid4().hex}.wav")
+    temp_file_path = _build_temp_file_path(original_filename)
 
     try:
         file_size = await _save_upload_file_stream(file, temp_file_path, LARGE_MAX_FILE_SIZE)

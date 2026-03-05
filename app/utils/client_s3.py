@@ -1,6 +1,7 @@
 import datetime
 import hashlib
 import hmac
+import mimetypes
 import os
 
 import requests
@@ -67,11 +68,17 @@ def upload_to_s3(file_path: str, file_name: str) -> str:
             f"SignedHeaders={signed_headers}, Signature={signature}"
         )
 
+        content_type = (
+            mimetypes.guess_type(file_name)[0]
+            or mimetypes.guess_type(file_path)[0]
+            or "application/octet-stream"
+        )
+
         headers = {
             "Authorization": authorization_header,
             "x-amz-content-sha256": "UNSIGNED-PAYLOAD",
             "x-amz-date": timestamp,
-            "Content-Type": "audio/wav"
+            "Content-Type": content_type,
         }
 
         with open(file_path, "rb") as f:

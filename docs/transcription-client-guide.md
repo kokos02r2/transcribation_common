@@ -60,16 +60,16 @@ curl -X POST "https://speech.tw1.ru/transcribe" \
 
 Поля формы:
 
-- `file` (обязательно): WAV-файл
+- `file` (обязательно): аудио/видео-файл
 - `webhook_url` (необязательно): URL для callback клиенту
 - `stream_id` (необязательно): ваш ID потока
 - `is_finished` (необязательно): `true` или `false`
 
 Ограничения:
 
-- Только формат `.wav`
 - Максимальный размер файла: `1 GB`
 - Ограничение по длительности отсутствует
+- Локальной проверки формата/длительности нет: файл отправляется в ElevenLabs как есть
 - Если `webhook_url` не передан (или передан пустой строкой), сервис не отправляет callback клиенту:
   результат доступен через polling `GET /transcribe/status/{task_id}`.
 
@@ -78,7 +78,7 @@ curl -X POST "https://speech.tw1.ru/transcribe" \
 ```bash
 curl -X POST "https://speech.tw1.ru/transcribe/large" \
   -H "Authorization: Bearer <ВАШ_API_TOKEN>" \
-  -F "file=@/path/to/large_audio.wav;type=audio/wav" \
+  -F "file=@/path/to/large_audio.webm;type=video/webm" \
   -F "webhook_url=https://client.example.com/hooks/transcribe" \
   -F "stream_id=dialog-large-1" \
   -F "is_finished=true"
@@ -165,8 +165,8 @@ curl -X GET "https://speech.tw1.ru/transcribe/status/4d5c3f5c-9d7f-4b0a-8df4-9c0
 ## 5. Ошибки, которые стоит обрабатывать клиенту
 
 - `400 Bad Request`
-- Неверный формат файла (не WAV)
 - Файл больше 50 MB
+- Неверный формат файла (не WAV)
 - Невалидный WAV
 - Длительность больше 15 минут
 - `401 Unauthorized` (невалидный/отсутствующий токен)
@@ -203,7 +203,7 @@ while True:
     data = status_resp.json()
 
     if data["status"] == "completed":
-        print(data["text"])
+        print(data.get("text") or data.get("payload"))
         break
     if data["status"] == "failed":
         raise RuntimeError(data.get("error", "Unknown error"))
