@@ -33,7 +33,6 @@ from app.tasks import (
 from app.utils.add_volume import auto_boost_volume
 from app.utils.client_s3 import (
     build_s3_object_url,
-    upload_to_s3,
 )
 from app.utils.large_transcription_state import (
     LARGE_TRANSCRIPTION_TTL_SECONDS,
@@ -79,13 +78,6 @@ def _build_temp_file_path(original_filename: str) -> str:
     if not extension or len(extension) > 16:
         extension = ".bin"
     return os.path.join(TEMP_FOLDER, f"{uuid.uuid4().hex}{extension}")
-
-
-def _build_large_s3_object_key(original_filename: str) -> str:
-    extension = os.path.splitext(os.path.basename(original_filename or ""))[1].lower()
-    if not extension or len(extension) > 16:
-        extension = ".bin"
-    return f"large/{uuid.uuid4().hex}{extension}"
 
 
 def _sanitize_file_name(file_name: str) -> str:
@@ -309,6 +301,7 @@ async def _start_large_transcription(
     session: AsyncSession,
     object_key: Optional[str],
     cloud_storage_url: Optional[str],
+    local_file_path: Optional[str] = None,
     original_filename: str,
     file_size_bytes: int,
     webhook_url: Optional[str],
@@ -368,7 +361,7 @@ async def _start_large_transcription(
     await session.commit()
 
     submit_large_elevenlabs_task.apply_async(
-        args=[None, task_id, callback_token, object_key, cloud_storage_url],
+        args=[local_file_path, task_id, callback_token, object_key, cloud_storage_url],
         task_id=task_id,
     )
 
@@ -566,16 +559,13 @@ async def transcribe_large_audio(
                 ),
             )
 
-        s3_object_key = _build_large_s3_object_key(original_filename)
-        upload_to_s3(temp_file_path, s3_object_key)
-        _safe_remove_file(temp_file_path)
-
         return await _start_large_transcription(
             token_user_id=token_user_id,
             token_user_email=token_user_email,
             session=session,
-            object_key=s3_object_key,
+            object_key=None,
             cloud_storage_url=None,
+            local_file_path=temp_file_path,
             original_filename=original_filename,
             file_size_bytes=file_size,
             webhook_url=webhook_url,
