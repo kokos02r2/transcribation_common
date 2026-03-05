@@ -87,8 +87,7 @@ curl -X POST "https://speech.tw1.ru/transcribe/large" \
 ```json
 {
   "task_id": "8a8afdb6-4d59-4e96-9cf8-8fb88f8f25a4",
-  "status": "processing",
-  "s3_url": "https://s3.timeweb.cloud/<bucket>/large/..."
+  "status": "processing"
 }
 ```
 

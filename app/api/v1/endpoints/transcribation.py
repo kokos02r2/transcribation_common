@@ -447,7 +447,6 @@ async def transcribe_large_audio(
         return {
             "task_id": task_id,
             "status": "processing",
-            "s3_url": s3_url,
         }
     except HTTPException:
         _safe_remove_file(temp_file_path)
