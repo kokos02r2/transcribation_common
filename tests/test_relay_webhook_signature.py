@@ -152,6 +152,70 @@ def test_relay_envelope_with_nested_transcription_and_request_id_mapping(client,
     assert captured["result_payload"] == payload
 
 
+def test_relay_webhook_error_marks_failed_and_sends_payload(client, monkeypatch):
+    captured = {}
+    delivered = {}
+
+    monkeypatch.setattr(
+        transcribation_module,
+        "get_large_task",
+        lambda *_args, **_kwargs: {
+            "task_id": "task-1",
+            "callback_token": "cb-token",
+            "client_webhook_url": "https://client.example/webhook",
+            "stream_id": "stream-1",
+            "is_finished": True,
+            "elevenlabs_request_id": None,
+        },
+    )
+
+    def _capture_update(_redis_client, _task_id, updates, **_kwargs):
+        captured.update(updates)
+        return {
+            "task_id": "task-1",
+            "client_webhook_url": "https://client.example/webhook",
+            "stream_id": "stream-1",
+            "is_finished": True,
+        }
+
+    def _capture_send(url, result, task_id, raw_payload=None):
+        delivered["url"] = url
+        delivered["result"] = result
+        delivered["task_id"] = task_id
+        delivered["raw_payload"] = raw_payload
+        return {"status": "success"}
+
+    monkeypatch.setattr(transcribation_module, "update_large_task", _capture_update)
+    monkeypatch.setattr(transcribation_module, "send_webhook_with_retries", _capture_send)
+
+    payload = {
+        "event_id": "evt-webhook-error-1",
+        "received_at": "2026-03-04T21:42:04Z",
+        "source_signature_valid": True,
+        "correlation_id": "corr-webhook-error-1",
+        "payload": {
+            "type": "webhook_error",
+            "error_message": "File 'audio' is corrupted. Please ensure it is playable audio.",
+            "webhook_metadata": {"task_id": "task-1", "callback_token": "cb-token"},
+        },
+    }
+    raw_body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    headers = _build_headers(raw_body, int(time.time()), "relay-secret")
+
+    response = client.post("/webhooks/elevenlabs", content=raw_body, headers=headers)
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "accepted"
+    assert response.json()["state"] == "failed"
+    assert captured["status"] == "failed"
+    assert captured["error"] == "File 'audio' is corrupted. Please ensure it is playable audio."
+    assert captured["result_payload"] == payload
+    assert delivered["url"] == "https://client.example/webhook"
+    assert delivered["task_id"] == "task-1"
+    assert delivered["result"] == payload
+    assert delivered["raw_payload"] == raw_body
+
+
 def test_invalid_signature_returns_401(client):
     payload = _base_payload()
     raw_body = json.dumps(payload).encode()

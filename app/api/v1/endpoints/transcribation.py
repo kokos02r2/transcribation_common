@@ -158,11 +158,24 @@ def _extract_elevenlabs_webhook_metadata(payload: dict) -> dict:
 
 def _extract_elevenlabs_error(payload: dict, body: dict) -> Optional[str]:
     for source in (payload, body):
-        if isinstance(source, dict) and source.get("error"):
+        if not isinstance(source, dict):
+            continue
+
+        if source.get("error"):
             value = source.get("error")
             if isinstance(value, dict):
                 return str(value.get("message") or value)
             return str(value)
+
+        if source.get("error_message"):
+            value = source.get("error_message")
+            if isinstance(value, dict):
+                return str(value.get("message") or value)
+            return str(value)
+
+        event_type = str(source.get("type") or "").strip().lower()
+        if event_type == "webhook_error":
+            return str(source.get("message") or "ElevenLabs webhook error")
     return None
 
 
@@ -645,13 +658,30 @@ async def receive_elevenlabs_webhook(request: Request):
     }
 
     if error_message:
-        updates.update({"status": "failed", "error": error_message})
-        update_large_task(
+        updates.update(
+            {
+                "status": "failed",
+                "error": error_message,
+                "result_payload": payload,
+            }
+        )
+        updated_state = update_large_task(
             redis_client,
             task_id,
             updates,
             ttl_seconds=LARGE_TRANSCRIPTION_TTL_SECONDS,
         )
+        if updated_state and updated_state.get("client_webhook_url"):
+            send_webhook_with_retries(
+                updated_state["client_webhook_url"],
+                payload,
+                task_id,
+                raw_payload=raw_body,
+            )
+        else:
+            logger.info(
+                f"ℹ️ No client webhook configured for task_id={task_id}; result available via status polling"
+            )
         return {"status": "accepted", "task_id": task_id, "state": "failed"}
 
     updates.update(
@@ -715,11 +745,15 @@ async def get_status(
                     "payload": payload,
                 }
             if state == "failed":
-                return {
+                response = {
                     "task_id": task_id,
                     "status": "failed",
                     "error": large_state.get("error", "Unknown error"),
                 }
+                payload = large_state.get("result_payload")
+                if payload is not None:
+                    response["payload"] = payload
+                return response
             return {"task_id": task_id, "status": "processing"}
 
         task_result = AsyncResult(task_id, app=celery)
