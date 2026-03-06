@@ -52,6 +52,57 @@
   font-size: 1rem;
   color: #2c3e55;
 }
+
+.token-panel {
+  height: 100%;
+  border: 1px solid #d8e2f0;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 18px;
+}
+
+.token-panel__title {
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: #243b55;
+  margin-bottom: 6px;
+}
+
+.token-panel__hint {
+  font-size: 0.93rem;
+  color: #516579;
+  margin-bottom: 12px;
+}
+
+.token-value {
+  border: 1px dashed #b7c6d8;
+  border-radius: 6px;
+  background: #f8fbff;
+  color: #1f2d3d;
+  font-family: "Courier New", Courier, monospace;
+  font-size: 0.9rem;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  min-height: 44px;
+  word-break: break-all;
+}
+
+.token-value--muted {
+  font-family: "Source Sans Pro", sans-serif;
+  color: #6c7f94;
+}
+
+.token-value--error {
+  background: #fff1f1;
+  border-color: #ffd9d9;
+  color: #a53a3a;
+}
+
+.token-panel__actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
   
 /* Адаптивность формы */
 @media (max-width: 767px) {
@@ -62,6 +113,10 @@
   .tariff-note {
     margin-top: 10px;
     padding: 16px 18px;
+  }
+
+  .token-panel {
+    padding: 14px;
   }
 }
 

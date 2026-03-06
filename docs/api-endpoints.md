@@ -93,6 +93,11 @@ curl -X POST "https://<YOUR_DOMAIN>/admin/users" \
 | GET | `/get_webhook_token/` | Пользователь (`auth_token`) | Получить текущий webhook-токен. |
 | DELETE | `/delete_webhook_token/` | Пользователь (`auth_token`) | Удалить свой webhook-токен. |
 
+Токены также можно управлять прямо из личного кабинета (`/dashboard`) в блоке "API токен / Webhook токен":
+- генерация/ротация;
+- удаление;
+- просмотр и копирование webhook-токена.
+
 ### Транскрибация
 
 | Метод | Путь | Доступ | Назначение |
