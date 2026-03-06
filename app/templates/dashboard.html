@@ -52,6 +52,9 @@
               <li class="nav-item">
                 <a href="/dashboard" class="nav-link">Статистика</a>
               </li>
+              <li class="nav-item">
+                <a href="/tokens" class="nav-link">Токены</a>
+              </li>
               {% if is_superuser %}
               <li class="nav-item">
                 <a href="/admin/dashboard" class="nav-link">Админ</a>
@@ -132,54 +135,6 @@
                           <div class="tariff-note__title">Ваш текущий тариф: <b>Стандарт</b></div>
                           <div class="tariff-note__text">
                             Стоимость распознавания аудио (Speech-to-Text): <b>0,8 руб./мин.</b>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div class="row mb-4">
-                      <div class="col-lg-6 col-12 mb-3 mb-lg-0">
-                        <div class="token-panel">
-                          <div class="token-panel__title">API токен</div>
-                          <div class="token-panel__hint">
-                            Для запросов к API в заголовке:
-                            <code>Authorization: Bearer &lt;TOKEN&gt;</code>
-                          </div>
-                          <div id="apiTokenDisplay" class="token-value token-value--muted">
-                            Токен не отображается. Сгенерируйте новый токен, чтобы получить значение.
-                          </div>
-                          <div class="token-panel__actions">
-                            <button id="generateApiTokenBtn" type="button" class="btn btn-primary">
-                              Сгенерировать / перегенерировать
-                            </button>
-                            <button id="deleteApiTokenBtn" type="button" class="btn btn-outline-danger">
-                              Удалить
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                      <div class="col-lg-6 col-12">
-                        <div class="token-panel">
-                          <div class="token-panel__title">Webhook токен</div>
-                          <div class="token-panel__hint">
-                            Используется для подписи исходящих webhook от сервиса.
-                          </div>
-                          <div id="webhookTokenDisplay" class="token-value token-value--muted">
-                            Нажмите "Показать текущий", чтобы получить значение webhook токена.
-                          </div>
-                          <div class="token-panel__actions">
-                            <button id="showWebhookTokenBtn" type="button" class="btn btn-outline-secondary">
-                              Показать текущий
-                            </button>
-                            <button id="generateWebhookTokenBtn" type="button" class="btn btn-primary">
-                              Сгенерировать / перегенерировать
-                            </button>
-                            <button id="deleteWebhookTokenBtn" type="button" class="btn btn-outline-danger">
-                              Удалить
-                            </button>
-                            <button id="copyWebhookTokenBtn" type="button" class="btn btn-outline-secondary" disabled>
-                              Копировать
-                            </button>
                           </div>
                         </div>
                       </div>

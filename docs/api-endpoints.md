@@ -67,8 +67,9 @@ curl -X POST "https://<YOUR_DOMAIN>/admin/users" \
 | GET | `/login` | Публичный | HTML-страница логина. |
 | GET | `/dashboard` | Пользователь (`auth_token`) | Пользовательский дашборд. |
 | GET | `/admin/dashboard` | Админ (`auth_token`) | Админ-дашборд. |
-| GET | `/api_token` | Пользователь (`auth_token`) | Страница управления API-токеном. |
-| GET | `/webhook_token` | Пользователь (`auth_token`) | Страница управления webhook-токеном. |
+| GET | `/tokens` | Пользователь (`auth_token`) | Единая страница управления API и webhook токенами. |
+| GET | `/api_token` | Пользователь (`auth_token`) | Legacy-алиас, редиректит на `/tokens`. |
+| GET | `/webhook_token` | Пользователь (`auth_token`) | Legacy-алиас, редиректит на `/tokens`. |
 
 ### Аутентификация и пользователи
 

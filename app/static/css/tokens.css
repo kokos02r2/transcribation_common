@@ -1,0 +1,90 @@
+.token-card {
+  border: 1px solid #d8e2f0;
+  border-radius: 10px;
+  background: #ffffff;
+  padding: 18px;
+  height: 100%;
+}
+
+.token-card__title {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: #2b3e55;
+  margin-bottom: 6px;
+}
+
+.token-card__description {
+  font-size: 0.95rem;
+  color: #566b81;
+  margin-bottom: 14px;
+}
+
+.token-card__row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.token-preview {
+  flex: 1;
+  text-align: left;
+  border: 1px dashed #b7c6d8;
+  border-radius: 7px;
+  background: #f8fbff;
+  color: #1f2d3d;
+  font-family: "Courier New", Courier, monospace;
+  font-size: 0.9rem;
+  padding: 11px 12px;
+  min-height: 44px;
+  word-break: break-all;
+}
+
+.token-preview.token-preview--muted {
+  font-family: "Source Sans Pro", sans-serif;
+  color: #70839a;
+}
+
+.token-preview.token-preview--error {
+  background: #fff1f1;
+  border-color: #ffd9d9;
+  color: #a53a3a;
+}
+
+.token-copy-btn {
+  min-width: 36px;
+}
+
+.token-meta {
+  font-size: 0.9rem;
+  color: #556c84;
+  margin-bottom: 12px;
+}
+
+.token-card__actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.modal-token-line {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+#tokenNoticeValue {
+  display: block;
+  flex: 1;
+  background: #f8fbff;
+  border: 1px solid #d7e6f5;
+  border-radius: 6px;
+  padding: 10px 12px;
+  word-break: break-all;
+}
+
+@media (max-width: 767px) {
+  .token-card {
+    padding: 14px;
+  }
+}
