@@ -80,3 +80,23 @@ async def get_webhook_token(
         "user_email": user.email,
         "webhook_token": webhook_token.token  # Предполагается, что у модели есть поле webhook_token
     }
+
+
+@router.get("/get_api_token_status/")
+async def get_api_token_status(
+    session: AsyncSession = Depends(get_async_session),
+    user: User = Depends(current_user),
+):
+    """Получение статуса API-токена без выдачи его значения."""
+    api_token = await crud_api_token.get_by_user(user.id, session)
+    if not api_token:
+        return {
+            "user_email": user.email,
+            "exists": False,
+            "created_at": None,
+        }
+    return {
+        "user_email": user.email,
+        "exists": True,
+        "created_at": api_token.created_at.isoformat() if api_token.created_at else None,
+    }

@@ -89,6 +89,7 @@ curl -X POST "https://<YOUR_DOMAIN>/admin/users" \
 | Метод | Путь | Доступ | Назначение |
 |---|---|---|---|
 | POST | `/generate_api_token/` | Пользователь (`auth_token`) | Создать/обновить API-токен пользователя. |
+| GET | `/get_api_token_status/` | Пользователь (`auth_token`) | Получить только статус существования API-токена (без выдачи значения). |
 | DELETE | `/delete_api_token/` | Пользователь (`auth_token`) | Удалить свой API-токен. |
 | POST | `/generate_webhook_token/` | Пользователь (`auth_token`) | Создать/обновить webhook-токен пользователя. |
 | GET | `/get_webhook_token/` | Пользователь (`auth_token`) | Получить текущий webhook-токен. |

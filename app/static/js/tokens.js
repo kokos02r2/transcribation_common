@@ -1,5 +1,6 @@
 const state = {
   apiToken: "",
+  apiTokenExists: false,
   webhookToken: "",
   apiRevealed: false,
   webhookRevealed: false,
@@ -50,8 +51,13 @@ function setCopyEnabled(kind, enabled) {
 }
 
 function syncApiPreview() {
-  if (!state.apiToken) {
+  if (!state.apiToken && !state.apiTokenExists) {
     setPreview("api", "Токен не сгенерирован", "muted");
+    setCopyEnabled("api", false);
+    return;
+  }
+  if (!state.apiToken && state.apiTokenExists) {
+    setPreview("api", "Токен существует (скрыт)", "muted");
     setCopyEnabled("api", false);
     return;
   }
@@ -125,6 +131,28 @@ async function loadWebhookToken() {
   setMeta("webhook", "Токен загружен. Нажмите на поле токена для полного просмотра.");
 }
 
+async function loadApiTokenStatus() {
+  const response = await fetchWithAuth("/get_api_token_status/", { method: "GET" }, { throwOnError: false });
+  if (!response) return;
+
+  if (!response.ok) {
+    setPreview("api", `Ошибка загрузки: ${response.status}`, "error");
+    setMeta("api", "Не удалось получить статус API токена.");
+    return;
+  }
+
+  const data = await response.json();
+  state.apiToken = "";
+  state.apiTokenExists = Boolean(data.exists);
+  state.apiRevealed = false;
+  syncApiPreview();
+  if (state.apiTokenExists) {
+    setMeta("api", "Токен уже существует и хранится в хеше. Полное значение недоступно, используйте перегенерацию.");
+  } else {
+    setMeta("api", "Токен еще не создан. Нажмите «Сгенерировать / перегенерировать».");
+  }
+}
+
 async function handleGenerateApi() {
   const response = await fetchWithAuth("/generate_api_token/", { method: "POST" }, { throwOnError: false });
   if (!response) return;
@@ -137,6 +165,7 @@ async function handleGenerateApi() {
 
   const data = await response.json();
   state.apiToken = data.api_token || "";
+  state.apiTokenExists = Boolean(state.apiToken);
   state.apiRevealed = false;
   syncApiPreview();
   setMeta("api", "API токен обновлен. Старый токен больше недействителен.");
@@ -161,6 +190,7 @@ async function handleDeleteApi() {
   }
 
   state.apiToken = "";
+  state.apiTokenExists = false;
   state.apiRevealed = false;
   syncApiPreview();
   setMeta("api", "API токен удален. Можно сгенерировать новый.");
@@ -214,6 +244,10 @@ function bindEvents() {
   document.getElementById("deleteWebhookBtn")?.addEventListener("click", handleDeleteWebhook);
 
   document.getElementById("apiPreviewBtn")?.addEventListener("click", () => {
+    if (!state.apiToken && state.apiTokenExists) {
+      setMeta("api", "Полное значение API токена недоступно после обновления страницы. Нажмите перегенерацию.");
+      return;
+    }
     if (!state.apiToken) return;
     state.apiRevealed = !state.apiRevealed;
     syncApiPreview();
@@ -226,6 +260,10 @@ function bindEvents() {
   });
 
   document.getElementById("copyApiBtn")?.addEventListener("click", async () => {
+    if (!state.apiToken) {
+      setMeta("api", "Скопировать API токен можно только сразу после генерации.");
+      return;
+    }
     const ok = await copyText(state.apiToken);
     setMeta("api", ok ? "API токен скопирован." : "Не удалось скопировать API токен.");
   });
@@ -250,5 +288,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   syncApiPreview();
   syncWebhookPreview();
   bindEvents();
+  await loadApiTokenStatus();
   await loadWebhookToken();
 });
