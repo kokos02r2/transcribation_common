@@ -31,6 +31,7 @@ from app.utils.large_transcription_state import (
     set_request_mapping,
     update_large_task,
 )
+from app.utils.provider_redaction import redact_provider_message
 from app.utils.webhook_sender import send_webhook_with_retries
 from app.utils.client_s3 import generate_presigned_download_url, upload_to_s3
 
@@ -119,6 +120,14 @@ WHISPER_HEADERS = {
 
 MAX_RETRIES = 30  # Количество попыток
 RETRY_DELAY = 30  # Задержка между попытками (в секундах)
+LARGE_SUBMIT_MAX_RETRIES = max(1, int(os.getenv("LARGE_SUBMIT_MAX_RETRIES", "4")))
+LARGE_SUBMIT_BACKOFF_SECONDS = max(0.0, _safe_float(os.getenv("LARGE_SUBMIT_BACKOFF_SECONDS", "2"), 2.0))
+LARGE_SUBMIT_BACKOFF_MULTIPLIER = max(1.0, _safe_float(os.getenv("LARGE_SUBMIT_BACKOFF_MULTIPLIER", "2"), 2.0))
+LARGE_SUBMIT_MAX_BACKOFF_SECONDS = max(
+    LARGE_SUBMIT_BACKOFF_SECONDS,
+    _safe_float(os.getenv("LARGE_SUBMIT_MAX_BACKOFF_SECONDS", "20"), 20.0),
+)
+LARGE_SUBMIT_RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
 
 redis_client = redis.StrictRedis.from_url(REDIS_URL, decode_responses=True)
 
@@ -311,7 +320,7 @@ def _prepare_socks5_proxy() -> tuple:
     if not ELEVENLABS_PROXY_URL or not ELEVENLABS_PROXY_URL.startswith("socks5://"):
         return None, "Прокси не настроен"
 
-    logger.info("🌐 Используем прокси из ELEVENLABS_PROXY_URL")
+    logger.info("🌐 Используем настроенный SOCKS5 прокси")
 
     parsed_url = urllib.parse.urlparse(ELEVENLABS_PROXY_URL)
     proxy_host = parsed_url.hostname
@@ -345,13 +354,26 @@ def _build_requests_proxy_kwargs() -> dict:
     return {"proxies": {"http": ELEVENLABS_PROXY_URL, "https": ELEVENLABS_PROXY_URL}}
 
 
+def _large_submit_backoff_delay(attempt_number: int) -> float:
+    """
+    Calculates delay before next submit retry.
+    attempt_number is 1-based.
+    """
+    if attempt_number <= 1:
+        return 0.0
+    exponent = attempt_number - 2
+    delay = LARGE_SUBMIT_BACKOFF_SECONDS * (LARGE_SUBMIT_BACKOFF_MULTIPLIER ** exponent)
+    return min(delay, LARGE_SUBMIT_MAX_BACKOFF_SECONDS)
+
+
 def _mark_large_task_failed(task_id: str, error_message: str) -> None:
+    sanitized_error = redact_provider_message(error_message) or "Ошибка сервиса транскрибации"
     update_large_task(
         redis_client,
         task_id,
         {
             "status": "failed",
-            "error": error_message,
+            "error": sanitized_error,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         },
         ttl_seconds=LARGE_TRANSCRIPTION_TTL_SECONDS,
@@ -960,7 +982,7 @@ def proxy_context(proxy_host: str, proxy_port: int, proxy_username: str = None, 
 
 def _transcribe_with_elevenlabs(audio_data: bytes, file_path: str) -> dict:
     if not ELEVENLABS_API_KEY:
-        return {"status": "failed", "error": "ELEVENLABS_API_KEY не задан"}
+        return {"status": "failed", "error": "API ключ сервиса транскрибации не задан"}
 
     proxy_settings, proxy_error = _prepare_socks5_proxy()
     if proxy_error:
@@ -969,11 +991,11 @@ def _transcribe_with_elevenlabs(audio_data: bytes, file_path: str) -> dict:
 
     proxy_host, proxy_port, proxy_username, proxy_password = proxy_settings
 
-    # Отправляем файл в ElevenLabs API
+    # Отправляем файл в STT API
     attempt = 0
     while attempt < MAX_RETRIES:
         try:
-            logger.info(f"Попытка {attempt + 1}: отправка файла в ElevenLabs API")
+            logger.info(f"Попытка {attempt + 1}: отправка файла в STT API")
 
             # Используем контекстный менеджер для безопасной работы с прокси
             with proxy_context(
@@ -1093,12 +1115,14 @@ def _transcribe_with_elevenlabs(audio_data: bytes, file_path: str) -> dict:
                     return {"status": "failed", "error": f"Ошибка обработки ответа: {str(parse_error)}"}
 
             logger.warning("⚠️ Получен пустой ответ от API")
-            error_msg = "Неверный формат ответа от ElevenLabs API"
+            error_msg = "Неверный формат ответа от сервиса транскрибации"
             logger.error(error_msg)
             return {"status": "failed", "error": error_msg}
 
         except Exception as e:
-            logger.error(f"Ошибка API ElevenLabs (попытка {attempt + 1} из {MAX_RETRIES}): {str(e)}")
+            logger.error(
+                f"Ошибка STT API (попытка {attempt + 1} из {MAX_RETRIES}): {redact_provider_message(str(e))}"
+            )
             time.sleep(RETRY_DELAY)
             attempt += 1
 
@@ -1127,8 +1151,9 @@ def submit_large_elevenlabs_task(
             return {"status": "failed", "error": f"File {local_file_path} not found"}
 
         if not ELEVENLABS_API_KEY:
-            _mark_large_task_failed(task_id, "ELEVENLABS_API_KEY не задан")
-            return {"status": "failed", "error": "ELEVENLABS_API_KEY not configured"}
+            safe_error = "API key for transcription provider is not configured"
+            _mark_large_task_failed(task_id, safe_error)
+            return {"status": "failed", "error": safe_error}
 
         webhook_metadata = json.dumps(
             {"task_id": task_id, "callback_token": callback_token},
@@ -1165,29 +1190,63 @@ def submit_large_elevenlabs_task(
                     str(s3_object_key),
                     ELEVENLABS_CLOUD_URL_EXPIRES_SECONDS,
                 )
-            response = requests.post(
-                ELEVENLABS_STT_API_URL,
-                **request_kwargs,
-            )
-        else:
-            with open(local_file_path, "rb") as audio_file:
-                files = {
-                    "file": (
-                        os.path.basename(local_file_path),
-                        audio_file,
-                        _guess_mime_type(local_file_path),
-                    )
-                }
-                response = requests.post(
-                    ELEVENLABS_STT_API_URL,
-                    files=files,
-                    **request_kwargs,
-                )
 
+        response = None
+        for attempt in range(1, LARGE_SUBMIT_MAX_RETRIES + 1):
+            delay = _large_submit_backoff_delay(attempt)
+            if delay > 0:
+                logger.warning(
+                    f"⚠️ Повторная отправка большого файла через {delay:.1f}с "
+                    f"(attempt {attempt}/{LARGE_SUBMIT_MAX_RETRIES})"
+                )
+                time.sleep(delay)
+
+            try:
+                if use_cloud_storage:
+                    response = requests.post(
+                        ELEVENLABS_STT_API_URL,
+                        **request_kwargs,
+                    )
+                else:
+                    with open(local_file_path, "rb") as audio_file:
+                        files = {
+                            "file": (
+                                os.path.basename(local_file_path),
+                                audio_file,
+                                _guess_mime_type(local_file_path),
+                            )
+                        }
+                        response = requests.post(
+                            ELEVENLABS_STT_API_URL,
+                            files=files,
+                            **request_kwargs,
+                        )
+            except requests.RequestException as exc:
+                safe_exc = redact_provider_message(exc)
+                logger.warning(
+                    f"⚠️ Сетевая ошибка submit (attempt {attempt}/{LARGE_SUBMIT_MAX_RETRIES}): {safe_exc}"
+                )
+                if attempt == LARGE_SUBMIT_MAX_RETRIES:
+                    raise
+                continue
+
+            if response.status_code in LARGE_SUBMIT_RETRYABLE_STATUSES and attempt < LARGE_SUBMIT_MAX_RETRIES:
+                safe_response_text = redact_provider_message(response.text[:300])
+                logger.warning(
+                    f"⚠️ Повторяем submit из-за HTTP {response.status_code} "
+                    f"(attempt {attempt}/{LARGE_SUBMIT_MAX_RETRIES}): {safe_response_text}"
+                )
+                continue
+
+            break
+
+        if response is None:
+            raise RuntimeError("Submit did not produce HTTP response")
         response_text = response.text[:1000]
         if not response.ok:
+            safe_response_text = redact_provider_message(response_text)
             error_message = (
-                f"ElevenLabs submit failed: {response.status_code} {response_text}"
+                f"Transcription submit failed: {response.status_code} {safe_response_text}"
             )
             _mark_large_task_failed(task_id, error_message)
             return {"status": "failed", "error": error_message}
@@ -1226,11 +1285,11 @@ def submit_large_elevenlabs_task(
         return {"status": "submitted", "request_id": request_id}
 
     except requests.RequestException as exc:
-        error_message = f"Ошибка сети при отправке в ElevenLabs: {exc}"
+        error_message = f"Ошибка сети при отправке в сервис транскрибации: {redact_provider_message(exc)}"
         _mark_large_task_failed(task_id, error_message)
         return {"status": "failed", "error": error_message}
     except Exception as exc:
-        error_message = f"Ошибка submit_large_elevenlabs_task: {exc}"
+        error_message = f"Ошибка submit_large_transcription_task: {redact_provider_message(exc)}"
         _mark_large_task_failed(task_id, error_message)
         return {"status": "failed", "error": error_message}
     finally:
@@ -1238,7 +1297,7 @@ def submit_large_elevenlabs_task(
             try:
                 if local_file_path and os.path.exists(local_file_path):
                     os.remove(local_file_path)
-                    logger.info(f"🗑 Файл {local_file_path} удалён после отправки в ElevenLabs.")
+                    logger.info(f"🗑 Файл {local_file_path} удалён после отправки в сервис транскрибации.")
             except Exception as exc:
                 logger.warning(f"⚠️ Ошибка удаления файла {local_file_path}: {exc}")
 
@@ -1265,7 +1324,7 @@ def transcribe_elevenlabs_task(self, file_path: str, webhook_url: str, stream_id
             audio_data = audio_file.read()
 
         providers = _get_transcription_providers()
-        logger.info(f"🔹 Провайдеры транскрибации: {', '.join(providers)}")
+        logger.info(f"🔹 Настроено провайдеров транскрибации: {len(providers)}")
 
         last_error = None
         for provider in providers:
@@ -1316,8 +1375,9 @@ def transcribe_elevenlabs_task(self, file_path: str, webhook_url: str, stream_id
 
                 return {"status": "completed", "text": cleaned_text, "speaker_count": speaker_count}
 
-            last_error = result.get("error") if result else "Неизвестная ошибка"
-            logger.warning(f"⚠️ Провайдер {provider} завершился ошибкой: {last_error}")
+            last_error = redact_provider_message(result.get("error") if result else "Неизвестная ошибка")
+            provider_index = providers.index(provider) + 1
+            logger.warning(f"⚠️ Провайдер транскрибации #{provider_index} завершился ошибкой: {last_error}")
 
         # Освобождаем память, если все провайдеры не сработали
         try:
@@ -1329,7 +1389,7 @@ def transcribe_elevenlabs_task(self, file_path: str, webhook_url: str, stream_id
         return {"status": "failed", "error": last_error or "Все провайдеры транскрибации завершились ошибкой"}
 
     except Exception as e:
-        logger.error(f"⚠️ Ошибка в transcribe_elevenlabs_task: {str(e)}", exc_info=True)
+        logger.error(f"⚠️ Ошибка в задаче транскрибации: {str(e)}", exc_info=True)
         # Освобождаем память при ошибке
         try:
             del audio_data

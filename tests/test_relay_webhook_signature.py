@@ -208,7 +208,7 @@ def test_relay_webhook_error_marks_failed_and_sends_payload(client, monkeypatch)
         "correlation_id": "corr-webhook-error-1",
         "payload": {
             "type": "webhook_error",
-            "error_message": "File 'audio' is corrupted. Please ensure it is playable audio.",
+            "error_message": "ElevenLabs upstream error: https://api.elevenlabs.io/v1/speech-to-text",
             "webhook_metadata": {"task_id": "task-1", "callback_token": "cb-token"},
         },
     }
@@ -220,13 +220,25 @@ def test_relay_webhook_error_marks_failed_and_sends_payload(client, monkeypatch)
     assert response.status_code == 200
     assert response.json()["status"] == "accepted"
     assert response.json()["state"] == "failed"
+    expected_payload = {
+        "event_id": "evt-webhook-error-1",
+        "received_at": "2026-03-04T21:42:04Z",
+        "source_signature_valid": True,
+        "correlation_id": "corr-webhook-error-1",
+        "payload": {
+            "type": "webhook_error",
+            "error_message": "transcription provider upstream error: <provider-api-url>",
+            "webhook_metadata": {"task_id": "task-1", "callback_token": "cb-token"},
+        },
+    }
+    expected_raw_payload = json.dumps(expected_payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     assert captured["status"] == "failed"
-    assert captured["error"] == "File 'audio' is corrupted. Please ensure it is playable audio."
-    assert captured["result_payload"] == payload
+    assert captured["error"] == "transcription provider upstream error: <provider-api-url>"
+    assert captured["result_payload"] == expected_payload
     assert delivered["url"] == "https://client.example/webhook"
     assert delivered["task_id"] == "task-1"
-    assert delivered["result"] == payload
-    assert delivered["raw_payload"] == raw_body
+    assert delivered["result"] == expected_payload
+    assert delivered["raw_payload"] == expected_raw_payload
 
 
 def test_invalid_signature_returns_401(client):

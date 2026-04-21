@@ -43,6 +43,7 @@ from app.utils.large_transcription_state import (
     set_large_task,
     update_large_task,
 )
+from app.utils.provider_redaction import redact_provider_message, redact_provider_payload
 from app.utils.round_duration_audio import round_duration
 from app.utils.token_checker import validate_api_token
 from app.utils.webhook_sender import send_webhook_with_retries
@@ -182,7 +183,7 @@ def _extract_elevenlabs_error(payload: dict, body: dict) -> Optional[str]:
 
         event_type = str(source.get("type") or "").strip().lower()
         if event_type == "webhook_error":
-            return str(source.get("message") or "ElevenLabs webhook error")
+            return str(source.get("message") or "Webhook processing error")
     return None
 
 
@@ -221,7 +222,7 @@ def _extract_text_and_speaker_count(payload: dict) -> tuple[str, int, Optional[s
                 speakers.add(str(speaker_id))
 
     speaker_count = len(speakers)
-    return text, speaker_count, error_message
+    return text, speaker_count, redact_provider_message(error_message) if error_message else None
 
 
 def _extract_provider_payload(payload: dict) -> dict:
@@ -551,7 +552,7 @@ async def transcribe_audio(
     except Exception as exc:
         logger.error(f"⚠️ Ошибка в эндпоинте /transcribe: {exc}")
         _safe_remove_file(unique_file_path)
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail=redact_provider_message(exc))
 
 
 @router.post("/transcribe/large")
@@ -666,7 +667,7 @@ async def transcribe_large_audio(
     except Exception as exc:
         logger.error(f"⚠️ Ошибка в эндпоинте /transcribe/large: {exc}")
         _safe_remove_file(temp_file_path)
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail=redact_provider_message(exc))
 
 
 @router.post("/webhooks/elevenlabs")
@@ -688,6 +689,13 @@ async def receive_elevenlabs_webhook(request: Request):
     if not isinstance(payload, dict):
         logger.warning(f"⚠️ Relay payload is not an object: correlation_id={correlation_id}")
         raise HTTPException(status_code=400, detail="Invalid webhook payload")
+
+    sanitized_payload = redact_provider_payload(payload)
+    sanitized_raw_body = json.dumps(
+        sanitized_payload,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
 
     correlation_id = (
         (request.headers.get("x-correlation-id") or payload.get("correlation_id") or "-").strip() or "-"
@@ -748,7 +756,7 @@ async def receive_elevenlabs_webhook(request: Request):
             {
                 "status": "failed",
                 "error": error_message,
-                "result_payload": payload,
+                "result_payload": sanitized_payload,
             }
         )
         updated_state = update_large_task(
@@ -760,9 +768,9 @@ async def receive_elevenlabs_webhook(request: Request):
         if updated_state and updated_state.get("client_webhook_url"):
             send_webhook_with_retries(
                 updated_state["client_webhook_url"],
-                payload,
+                sanitized_payload,
                 task_id,
-                raw_payload=raw_body,
+                raw_payload=sanitized_raw_body,
             )
         else:
             logger.info(
@@ -776,7 +784,7 @@ async def receive_elevenlabs_webhook(request: Request):
             "text": text,
             "speaker_count": speaker_count,
             "duration_seconds": duration_seconds,
-            "result_payload": payload,
+            "result_payload": sanitized_payload,
             "error": None,
         }
     )
@@ -790,9 +798,9 @@ async def receive_elevenlabs_webhook(request: Request):
     if updated_state and updated_state.get("client_webhook_url"):
         send_webhook_with_retries(
             updated_state["client_webhook_url"],
-            payload,
+            sanitized_payload,
             task_id,
-            raw_payload=raw_body,
+            raw_payload=sanitized_raw_body,
         )
     else:
         logger.info(
@@ -835,17 +843,17 @@ async def get_status(
                 return {
                     "task_id": task_id,
                     "status": "completed",
-                    "payload": payload,
+                    "payload": redact_provider_payload(payload),
                 }
             if state == "failed":
                 response = {
                     "task_id": task_id,
                     "status": "failed",
-                    "error": large_state.get("error", "Unknown error"),
+                    "error": redact_provider_message(large_state.get("error", "Unknown error")),
                 }
                 payload = large_state.get("result_payload")
                 if payload is not None:
-                    response["payload"] = payload
+                    response["payload"] = redact_provider_payload(payload)
                 return response
             return {"task_id": task_id, "status": "processing"}
 
@@ -855,19 +863,27 @@ async def get_status(
 
         if task_result.state == "SUCCESS":
             result = task_result.result
-            if isinstance(result, dict) and "text" in result:
-                return {
-                    "task_id": task_id,
-                    "status": "completed",
-                    "text": result["text"],
-                }
+            if isinstance(result, dict):
+                result_status = str(result.get("status") or "").lower()
+                if result_status == "failed":
+                    return {
+                        "task_id": task_id,
+                        "status": "failed",
+                        "error": redact_provider_message(result.get("error", "Unknown error")),
+                    }
+                if "text" in result:
+                    return {
+                        "task_id": task_id,
+                        "status": "completed",
+                        "text": result["text"],
+                    }
             return {"task_id": task_id, "status": "completed", "text": str(result)}
 
         if task_result.state == "FAILURE":
             return {
                 "task_id": task_id,
                 "status": "failed",
-                "error": str(task_result.result),
+                "error": redact_provider_message(task_result.result),
             }
 
         return {"task_id": task_id, "status": task_result.state}
@@ -875,4 +891,7 @@ async def get_status(
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Error retrieving task status: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error retrieving task status: {redact_provider_message(exc)}",
+        )
